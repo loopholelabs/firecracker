@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use seccompiler::BpfThreadMap;
 use serde::Serialize;
-use snapshot::Snapshot;
+use snapshot::{Error, Snapshot};
 use userfaultfd::{FeatureFlags, Uffd, UffdBuilder};
 use utils::sock_ctrl_msg::ScmSocket;
 use utils::u64_to_usize;
@@ -35,7 +35,8 @@ use crate::vmm_config::boot_source::BootSourceConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::machine_config::MAX_SUPPORTED_VCPUS;
 use crate::vmm_config::snapshot::{
-    CreateSnapshotParams, LoadSnapshotParams, MemBackendType, SnapshotType,
+    CreateSnapshotNoMemoryParams, CreateSnapshotParams, LoadSnapshotParams, MemBackendType,
+    SnapshotType,
 };
 use crate::vstate::memory::{
     GuestMemory, GuestMemoryExtension, GuestMemoryMmap, GuestMemoryState, MemoryError,
@@ -172,6 +173,8 @@ pub enum CreateSnapshotError {
     MicrovmState(MicrovmStateError),
     /// Cannot serialize the microVM state: {0}
     SerializeMicrovmState(snapshot::Error),
+    /// Failed to sync Microvm memory.
+    MemoryMsync(MemoryError),
     /// Cannot perform {0} on the snapshot backing file: {1}
     SnapshotBackingFile(&'static str, io::Error),
     #[rustfmt::skip]
@@ -204,6 +207,34 @@ pub fn create_snapshot(
     )?;
 
     snapshot_memory_to_file(vmm, &params.mem_file_path, params.snapshot_type)?;
+
+    Ok(())
+}
+
+/// Creates a Microvm snapshot without memory.
+pub fn create_snapshot_nomemory(
+    vmm: &mut Vmm,
+    vm_info: &VmInfo,
+    params: &CreateSnapshotNoMemoryParams,
+    version_map: VersionMap,
+) -> std::result::Result<(), CreateSnapshotError> {
+    // Fail early from invalid target version.
+    let snapshot_data_version = version_map.latest_version();
+
+    let microvm_state = vmm
+        .save_state(vm_info)
+        .map_err(CreateSnapshotError::MicrovmState)?;
+
+    snapshot_state_to_file(
+        &microvm_state,
+        &params.snapshot_path,
+        snapshot_data_version,
+        version_map,
+    )?;
+
+    vmm.guest_memory()
+        .msync()
+        .map_err(CreateSnapshotError::MemoryMsync)?;
 
     Ok(())
 }
@@ -488,10 +519,14 @@ fn snapshot_state_from_file(
 ) -> Result<MicrovmState, SnapshotStateFromFileError> {
     let mut snapshot_reader =
         File::open(snapshot_path).map_err(SnapshotStateFromFileError::Open)?;
-    let metadata = std::fs::metadata(snapshot_path).map_err(SnapshotStateFromFileError::Meta)?;
-    let snapshot_len = u64_to_usize(metadata.len());
-    let (state, _) = Snapshot::load(&mut snapshot_reader, snapshot_len, version_map)
-        .map_err(SnapshotStateFromFileError::Load)?;
+    let snapshot_len: u64 = Versionize::deserialize(&mut snapshot_reader, &version_map, 0)
+        .map_err(Error::Versionize)?;
+    let (state, _) = Snapshot::load(
+        &mut snapshot_reader,
+        u64_to_usize(snapshot_len),
+        version_map,
+    )
+    .map_err(SnapshotStateFromFileError::Load)?;
     Ok(state)
 }
 
@@ -509,7 +544,10 @@ fn guest_memory_from_file(
     mem_state: &GuestMemoryState,
     track_dirty_pages: bool,
 ) -> Result<GuestMemoryMmap, GuestMemoryFromFileError> {
-    let mem_file = File::open(mem_file_path)?;
+    let mem_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(mem_file_path)?;
     let guest_mem = GuestMemoryMmap::from_state(Some(&mem_file), mem_state, track_dirty_pages)?;
     Ok(guest_mem)
 }

@@ -60,6 +60,8 @@ pub enum Error {
     Io(i32),
     /// A versioned serialization/deserialization error occurred: {0}
     Versionize(versionize::VersionizeError),
+    /// A snapshot write error occured
+    Write,
 }
 
 #[derive(Default, Debug, Versionize)]
@@ -149,7 +151,7 @@ impl Snapshot {
         let raw_snapshot_len = snapshot_len
             .checked_sub(std::mem::size_of::<u64>())
             .ok_or(Error::InvalidSnapshotSize)?;
-        let mut snapshot = vec![0u8; raw_snapshot_len];
+        let mut snapshot = vec![0u8; raw_snapshot_len - std::mem::size_of::<u64>()];
         crc_reader
             .read_exact(&mut snapshot)
             .map_err(|ref err| Error::Io(err.raw_os_error().unwrap_or(libc::EINVAL)))?;
@@ -175,13 +177,29 @@ impl Snapshot {
         T: Write + Debug,
         O: Versionize + Debug,
     {
-        let mut crc_writer = CRC64Writer::new(writer);
-        self.save_without_crc(&mut crc_writer, object)?;
+        // Write snapshot to snapshot buffer
+        let mut snapshot_buf = Vec::new();
+        self.save_without_crc(&mut snapshot_buf, object)?;
 
+        // Calculate expected length
+        let total_length =
+            snapshot_buf.len() as usize + std::mem::size_of::<u64>() + std::mem::size_of::<u64>(); // See utils::u64_to_usize; `size_of::<u64>()` to accommodate size and checksum
+
+        // Write size to output file
+        (total_length as u64)
+            .serialize(writer, &Self::format_version_map(), 0)
+            .map_err(Error::Versionize)?;
+
+        // Write snapshot buffer to output file
+        let mut crc_writer = CRC64Writer::new(writer);
+        crc_writer.write(&snapshot_buf).map_err(|_| Error::Write)?;
+
+        // Write checksum to output file
         let checksum = crc_writer.checksum();
         checksum
             .serialize(&mut crc_writer, &Self::format_version_map(), 0)
             .map_err(Error::Versionize)?;
+
         Ok(())
     }
 

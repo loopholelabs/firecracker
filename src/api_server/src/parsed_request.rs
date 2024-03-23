@@ -24,7 +24,7 @@ use crate::request::machine_configuration::{
 use crate::request::metrics::parse_put_metrics;
 use crate::request::mmds::{parse_get_mmds, parse_patch_mmds, parse_put_mmds};
 use crate::request::net::{parse_patch_net, parse_put_net};
-use crate::request::snapshot::{parse_patch_vm_state, parse_put_snapshot};
+use crate::request::snapshot::{parse_patch_vm_state, parse_put_snapshot, parse_put_snapshot_nomemory};
 use crate::request::version::parse_get_version;
 use crate::request::vsock::parse_put_vsock;
 use crate::ApiServer;
@@ -98,6 +98,9 @@ impl TryFrom<&Request> for ParsedRequest {
                 parse_put_net(body, path_tokens.next())
             }
             (Method::Put, "snapshot", Some(body)) => parse_put_snapshot(body, path_tokens.next()),
+            (Method::Put, "snapshot-nomemory", Some(body)) => {
+                parse_put_snapshot_nomemory(body, path_tokens.next())
+            }
             (Method::Put, "vsock", Some(body)) => parse_put_vsock(body),
             (Method::Put, "entropy", Some(body)) => parse_put_entropy(body),
             (Method::Put, _, None) => method_to_error(Method::Put),
