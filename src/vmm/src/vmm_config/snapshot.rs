@@ -53,6 +53,8 @@ pub struct CreateSnapshotParams {
 pub struct CreateSnapshotNoMemoryParams {
     /// Path to the file that will contain the microVM state.
     pub snapshot_path: PathBuf,
+    /// When set to true, the VM is only `msync`ed
+    pub msync_only: bool,
 }
 
 /// Stores the configuration that will be used for loading a snapshot.

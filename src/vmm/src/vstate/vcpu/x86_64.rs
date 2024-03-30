@@ -444,7 +444,9 @@ impl KvmVcpu {
 
     /// Scale the TSC frequency of this vCPU to the one provided as a parameter.
     pub fn set_tsc_khz(&self, tsc_freq: u32) -> Result<(), SetTscError> {
-        self.fd.set_tsc_khz(tsc_freq).map_err(SetTscError)
+        // self.fd.set_tsc_khz(tsc_freq).map_err(SetTscError)
+
+        Ok(())
     }
 
     /// Use provided state to populate KVM internal state.

@@ -183,11 +183,13 @@ pub fn create_snapshot_nomemory(
     vm_info: &VmInfo,
     params: &CreateSnapshotNoMemoryParams,
 ) -> std::result::Result<(), CreateSnapshotError> {
-    let microvm_state = vmm
-        .save_state(vm_info)
-        .map_err(CreateSnapshotError::MicrovmState)?;
+    if !params.msync_only {
+        let microvm_state = vmm
+            .save_state(vm_info)
+            .map_err(CreateSnapshotError::MicrovmState)?;
 
-    snapshot_state_to_file(&microvm_state, &params.snapshot_path)?;
+        snapshot_state_to_file(&microvm_state, &params.snapshot_path)?;
+    }
 
     vmm.guest_memory()
         .msync()
