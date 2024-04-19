@@ -23,7 +23,7 @@ pub enum NormalizeCpuidError {
     /// Missing leaf 0x80000000.
     MissingLeaf0x80000000,
     /// Missing leaf 0x80000001.
-    MissingLeaf0x40000001,
+    MissingLeaf0x80000001,
     /// Failed to set feature entry leaf: {0}
     FeatureEntry(#[from] FeatureEntryError),
     /// Failed to set extended cache topology leaf: {0}
