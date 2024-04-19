@@ -270,6 +270,7 @@ pub fn msr_should_serialize(index: u32) -> bool {
     // SERIALIZABLE_MSR_RANGES
     //     .iter()
     //     .any(|range| range.contains(index))
+   return true;
 }
 
 /// Returns the list of serializable MSR indices.
