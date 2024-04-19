@@ -264,12 +264,12 @@ static SERIALIZABLE_MSR_RANGES: &[MsrRange] = &[
 /// * `index` - The index of the MSR that is checked whether it's needed for serialization.
 pub fn msr_should_serialize(index: u32) -> bool {
     // Denied MSR not exported by Linux: IA32_MCG_CTL
-    if index == MSR_IA32_MCG_CTL {
-        return false;
-    };
-    SERIALIZABLE_MSR_RANGES
-        .iter()
-        .any(|range| range.contains(index))
+    // if index == MSR_IA32_MCG_CTL {
+    //     return false;
+    // };
+    // SERIALIZABLE_MSR_RANGES
+    //     .iter()
+    //     .any(|range| range.contains(index))
 }
 
 /// Returns the list of serializable MSR indices.
@@ -286,7 +286,7 @@ pub fn get_msrs_to_save(kvm_fd: &Kvm) -> Result<MsrList, MsrError> {
     let mut msr_index_list = kvm_fd
         .get_msr_index_list()
         .map_err(MsrError::GetMsrIndexList)?;
-    msr_index_list.retain(|msr_index| msr_should_serialize(*msr_index));
+    // msr_index_list.retain(|msr_index| msr_should_serialize(*msr_index));
     Ok(msr_index_list)
 }
 
