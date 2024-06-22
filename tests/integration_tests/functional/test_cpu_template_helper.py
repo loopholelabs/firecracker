@@ -208,6 +208,9 @@ MSR_EXCEPTION_LIST = [
     0x48,
     # MSR_IA32_SMBASE is not accessible outside of System Management Mode.
     0x9E,
+    # MSR_IA32_TSX_CTRL is R/W MSR to disable Intel TSX feature as a mitigation
+    # against TAA vulnerability.
+    0x122,
     # MSR_IA32_SYSENTER_CS, MSR_IA32_SYSENTER_ESP and MSR_IA32_SYSENTER_EIP are
     # R/W MSRs that will be set up by OS to call fast system calls with
     # SYSENTER.
@@ -438,6 +441,9 @@ def test_consecutive_cpu_config_consistency(uvm_plain, cpu_template_helper, tmp_
     # Strip common entries.
     cpu_template_helper.template_strip([cpu_config_1, cpu_config_2])
 
+    config_1 = json.loads(cpu_config_1.read_text(encoding="utf-8"))
+    config_2 = json.loads(cpu_config_2.read_text(encoding="utf-8"))
+
     # Check the stripped result is empty.
     if PLATFORM == "x86_64":
         empty_cpu_config = {
@@ -446,10 +452,21 @@ def test_consecutive_cpu_config_consistency(uvm_plain, cpu_template_helper, tmp_
             "msr_modifiers": [],
         }
     elif PLATFORM == "aarch64":
+        # 0x603000000013df01 -> CNTPCT_EL0
+        ignore_registers = ["0x603000000013df01"]
+
+        config_1["reg_modifiers"] = [
+            rm for rm in config_1["reg_modifiers"] if rm["addr"] not in ignore_registers
+        ]
+        config_2["reg_modifiers"] = [
+            rm for rm in config_2["reg_modifiers"] if rm["addr"] not in ignore_registers
+        ]
+
         empty_cpu_config = {
             "kvm_capabilities": [],
             "reg_modifiers": [],
             "vcpu_features": [],
         }
-    assert json.loads(cpu_config_1.read_text(encoding="utf-8")) == empty_cpu_config
-    assert json.loads(cpu_config_2.read_text(encoding="utf-8")) == empty_cpu_config
+
+    assert config_1 == empty_cpu_config
+    assert config_2 == empty_cpu_config
