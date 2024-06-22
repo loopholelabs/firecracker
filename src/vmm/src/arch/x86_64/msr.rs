@@ -50,7 +50,7 @@ const APIC_BASE_MSR: u32 = 0x800;
 /// Number of APIC MSR indexes
 const APIC_MSR_INDEXES: u32 = 0x400;
 
-/// Custom MSRs fall in the range 0x4b564d00-0x4b564dff
+/// Custom KVM MSRs fall in the range 0x4b564d00-0x4b564dff
 const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b56_4d00;
 const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b56_4d01;
 const MSR_KVM_ASYNC_PF_EN: u32 = 0x4b56_4d02;
@@ -236,6 +236,7 @@ static SERIALIZABLE_MSR_RANGES: &[MsrRange] = &[
     MSR_RANGE!(MSR_K7_HWCR),
     MSR_RANGE!(MSR_KVM_POLL_CONTROL),
     MSR_RANGE!(MSR_KVM_ASYNC_PF_INT),
+    MSR_RANGE!(MSR_IA32_TSX_CTRL),
 ];
 
 /// Specifies whether a particular MSR should be included in vcpu serialization.
@@ -387,6 +388,8 @@ static UNDUMPABLE_MSR_RANGES: &[MsrRange] = &[
     MSR_RANGE!(HV_X64_MSR_SYNDBG_CONTROL, 5),
     // HV_X64_MSR_SYNDBG_OPTIONS
     MSR_RANGE!(HV_X64_MSR_SYNDBG_OPTIONS),
+    // HV_X64_MSR_TSC_INVARIANT_CONTROL
+    MSR_RANGE!(HV_X64_MSR_TSC_INVARIANT_CONTROL),
 ];
 
 /// Specifies whether a particular MSR should be dumped.
