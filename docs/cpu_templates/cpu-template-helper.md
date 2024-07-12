@@ -184,7 +184,7 @@ CPU features to a heterogeneous fleet consisting of multiple CPU models.
 ### MSRs excluded from guest CPU configuration dump
 
 | Register name                           | Index                   |
-| --------------------------------------- | ----------------------- |
+|-----------------------------------------|-------------------------|
 | MSR_IA32_TSC                            | 0x00000010              |
 | MSR_ARCH_PERFMON_PERFCTRn               | 0x000000c1 - 0x000000d2 |
 | MSR_ARCH_PERFMON_EVENTSELn              | 0x00000186 - 0x00000197 |
