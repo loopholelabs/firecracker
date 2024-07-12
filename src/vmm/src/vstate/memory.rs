@@ -6,6 +6,7 @@
 // found in the THIRD-PARTY file.
 
 use std::fs::File;
+use std::io;
 use std::io::SeekFrom;
 
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,7 @@ pub enum MemoryError {
     /// Cannot create memfd: {0}
     Memfd(memfd::Error),
     /// Cannot resize memfd file: {0}
-    MemfdSetLen(std::io::Error),
+    MemfdSetLen(io::Error),
     /// Cannot restore hugetlbfs backed snapshot by mapping the memory file. Please use uffd.
     HugetlbfsSnapshot,
 }
@@ -220,6 +221,9 @@ impl GuestMemoryExtension for GuestMemoryMmap {
                     .build()
                     .map_err(MemoryError::MmapRegionError)?;
 
+                unsafe {
+                   libc::posix_madvise(region.as_ptr() as *mut libc::c_void, region_size, libc::MADV_WILLNEED);
+                }
                 GuestRegionMmap::new(region, guest_address).map_err(MemoryError::VmMemoryError)
             })
             .collect::<Result<Vec<_>, MemoryError>>()?;
