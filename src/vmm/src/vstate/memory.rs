@@ -203,9 +203,9 @@ impl GuestMemoryExtension for GuestMemoryMmap {
     ) -> Result<Self, MemoryError> {
         let prot = libc::PROT_READ | libc::PROT_WRITE;
         let flags = if shared {
-            libc::MAP_NORESERVE | libc::MAP_SHARED
+            libc::MAP_NORESERVE | libc::MAP_POPULATE | libc::MAP_SHARED
         } else {
-            libc::MAP_NORESERVE | libc::MAP_PRIVATE
+            libc::MAP_NORESERVE | libc::MAP_POPULATE | libc::MAP_PRIVATE
         };
         let regions = regions
             .into_iter()
@@ -221,9 +221,6 @@ impl GuestMemoryExtension for GuestMemoryMmap {
                     .build()
                     .map_err(MemoryError::MmapRegionError)?;
 
-                unsafe {
-                   libc::posix_madvise(region.as_ptr() as *mut libc::c_void, region_size, libc::MADV_WILLNEED);
-                }
                 GuestRegionMmap::new(region, guest_address).map_err(MemoryError::VmMemoryError)
             })
             .collect::<Result<Vec<_>, MemoryError>>()?;
