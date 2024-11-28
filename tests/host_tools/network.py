@@ -5,6 +5,7 @@
 import ipaddress
 import random
 import string
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,7 +26,7 @@ class SSHConnection:
     ssh -i ssh_key_path username@hostname
     """
 
-    def __init__(self, netns, ssh_key: Path, host, user):
+    def __init__(self, netns, ssh_key: Path, host, user, *, on_error=None):
         """Instantiate a SSH client and connect to a microVM."""
         self.netns = netns
         self.ssh_key = ssh_key
@@ -36,6 +37,8 @@ class SSHConnection:
         assert (ssh_key.stat().st_mode & 0o777) == 0o400
         self.host = host
         self.user = user
+
+        self._on_error = None
 
         self.options = [
             "-o",
@@ -52,11 +55,27 @@ class SSHConnection:
             str(self.ssh_key),
         ]
 
-        self._init_connection()
+        # _init_connection loops until it can connect to the guest
+        # dumping debug state on every iteration is not useful or wanted, so
+        # only dump it once if _all_ iterations fail.
+        try:
+            self._init_connection()
+        except Exception as exc:
+            if on_error:
+                on_error(exc)
+
+            raise
+
+        self._on_error = on_error
+
+    @property
+    def user_host(self):
+        """remote address for in SSH format <user>@<IP>"""
+        return f"{self.user}@{self.host}"
 
     def remote_path(self, path):
         """Convert a path to remote"""
-        return f"{self.user}@{self.host}:{path}"
+        return f"{self.user_host}:{path}"
 
     def _scp(self, path1, path2, options):
         """Copy files to/from the VM using scp."""
@@ -78,7 +97,7 @@ class SSHConnection:
 
     @retry(
         retry=retry_if_exception_type(ChildProcessError),
-        wait=wait_fixed(0.15),
+        wait=wait_fixed(0.5),
         stop=stop_after_attempt(20),
         reraise=True,
     )
@@ -90,38 +109,66 @@ class SSHConnection:
         We'll keep trying to execute a remote command that can't fail
         (`/bin/true`), until we get a successful (0) exit code.
         """
-        self.check_output("true")
+        self.check_output("true", timeout=100, debug=True)
 
-    def run(self, cmd_string, timeout=None, *, check=False):
-        """Execute the command passed as a string in the ssh context."""
-        return self._exec(
-            [
-                "ssh",
-                *self.options,
-                f"{self.user}@{self.host}",
-                cmd_string,
-            ],
-            timeout,
-            check=check,
-        )
+    def run(self, cmd_string, timeout=None, *, check=False, debug=False):
+        """
+        Execute the command passed as a string in the ssh context.
 
-    def check_output(self, cmd_string, timeout=None):
+        If `debug` is set, pass `-vvv` to `ssh`. Note that this will clobber stderr.
+        """
+        command = ["ssh", *self.options, self.user_host, cmd_string]
+
+        if debug:
+            command.insert(1, "-vvv")
+
+        return self._exec(command, timeout, check=check)
+
+    def check_output(self, cmd_string, timeout=None, *, debug=False):
         """Same as `run`, but raises an exception on non-zero return code of remote command"""
-        return self.run(cmd_string, timeout, check=True)
+        return self.run(cmd_string, timeout, check=True, debug=debug)
 
     def _exec(self, cmd, timeout=None, check=False):
         """Private function that handles the ssh client invocation."""
         if self.netns is not None:
             cmd = ["ip", "netns", "exec", self.netns] + cmd
 
-        return utils.run_cmd(cmd, check=check, timeout=timeout)
+        try:
+            return utils.run_cmd(cmd, check=check, timeout=timeout)
+        except Exception as exc:
+            if self._on_error:
+                self._on_error(exc)
+
+            raise
+
+    # pylint:disable=invalid-name
+    def Popen(
+        self,
+        cmd: str,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **kwargs,
+    ) -> subprocess.Popen:
+        """Execute the command in the guest and return a Popen object.
+
+        pop = uvm.ssh.Popen("while true; do echo $(date -Is) $RANDOM; sleep 1; done")
+        pop.stdout.read(16)
+        """
+        cmd = ["ssh", *self.options, self.user_host, cmd]
+        if self.netns is not None:
+            cmd = ["ip", "netns", "exec", self.netns] + cmd
+        return subprocess.Popen(
+            cmd, stdin=stdin, stdout=stdout, stderr=stderr, **kwargs
+        )
 
 
 def mac_from_ip(ip_address):
     """Create a MAC address based on the provided IP.
 
     Algorithm:
-    - the first 2 bytes are fixed to 06:00
+    - the first 2 bytes are fixed to 06:00, which is in an LAA range
+      - https://en.wikipedia.org/wiki/MAC_address#Ranges_of_group_and_locally_administered_addresses
     - the next 4 bytes are the IP address
 
     Example of function call:

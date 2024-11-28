@@ -33,6 +33,10 @@
                 "comment": "Used by the VirtIO net device to write to tap"
             },
             {
+                "syscall": "readv",
+                "comment": "Used by the VirtIO net device to read from tap"
+            },
+            {
                 "syscall": "fsync"
             },
             {
@@ -1251,6 +1255,18 @@
                         "op": "eq",
                         "val": 1074025680,
                         "comment": "TUNSETOFFLOAD"
+                    }
+                ]
+            },
+            {
+                "syscall": "ioctl",
+                "args": [
+                    {
+                        "index": 1,
+                        "type": "dword",
+                        "op": "eq",
+                        "val": 44717,
+                        "comment": "KVM_KVMCLOCK_CTRL. We call this after pausing vCPUs to avoid soft lockups in the guest."
                     }
                 ]
             },

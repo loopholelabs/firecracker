@@ -134,6 +134,8 @@ OPT_UNATTENDED=false
 # Get the target prefix to avoid repeated calls to uname -m
 TARGET_PREFIX="$(uname -m)-unknown-linux-"
 
+# Container path to directory where we store built CI artifacts.
+CTR_CI_ARTIFACTS_PATH="${CTR_FC_ROOT_DIR}/resources/$(uname -m)"
 
 # Check if Docker is available and exit if it's not.
 # Upon returning from this call, the caller can be certain Docker is available.
@@ -231,7 +233,7 @@ cmd_fix_perms() {
     run_devctr \
         --workdir "$CTR_FC_ROOT_DIR" \
         -- \
-        chown -R "$(id -u):$(id -g)" "$CTR_FC_BUILD_DIR"  "$CTR_TEST_RESULTS_DIR"
+        chown -f -R "$(id -u):$(id -g)" "$CTR_FC_BUILD_DIR" "$CTR_TEST_RESULTS_DIR" "$CTR_CI_ARTIFACTS_PATH"
 }
 
 # Builds the development container from its Dockerfile.
@@ -412,6 +414,10 @@ cmd_help() {
     echo "            --performance            Tweak various setting of the host running the tests (such as C- and P-states)"
     echo "                                     to achieve consistent performance. Used for running performance tests in CI."
     echo ""
+    echo "    build_ci_artifacts [all|rootfs|kernels]"
+    echo "        Builds the rootfs and guest kernel artifacts we use for our CI."
+    echo "        Run './tools/devtool build_ci_artifacts help' for more details about the available commands."
+    echo ""
 
     cat <<EOF
     test_debug [-- [<pytest args>]]
@@ -440,12 +446,14 @@ cmd_build() {
     profile="debug"
     libc="musl"
 
+
     # Parse any command line args.
     while [ $# -gt 0 ]; do
         case "$1" in
             "-h"|"--help")  { cmd_help; exit 1;     } ;;
             "--debug")      { profile="debug";      } ;;
             "--release")    { profile="release";    } ;;
+            "--rev")       { shift; revision=$1; } ;;
             "--ssh-keys")
                 shift
                 [[ -z "$1" ]] && \
@@ -483,16 +491,40 @@ cmd_build() {
         extra_args="--volume $host_pub_key_path:$PUB_KEY_PATH:z \
                     --volume $host_priv_key_path:$PRIV_KEY_PATH:z"
 
+    workdir="$CTR_FC_ROOT_DIR"
+    if [ ! -z "$revision" ]; then
+      commitish="$revision"
+      if ! git cat-file -t "$commitish"; then commitish=origin/"$revision"; fi
+      branch_name=tmp-$commitish
+
+      tmp_dir=$(mktemp -d)
+
+      git branch $branch_name $commitish
+      git clone -b $branch_name . $tmp_dir
+      pushd $tmp_dir
+      workdir=$tmp_dir
+      extra_args="$extra_args --volume $tmp_dir:$tmp_dir:z"
+    fi
+
     # Run the cargo build process inside the container.
     # We don't need any special privileges for the build phase, so we run the
     # container as the current user/group.
     run_devctr \
         --user "$(id -u):$(id -g)" \
-        --workdir "$CTR_FC_ROOT_DIR" \
+        --workdir "$workdir" \
         ${extra_args} \
         -- \
         ./tools/release.sh --libc $libc --profile $profile
     ret=$?
+
+    if [ ! -z "$revision" ]; then
+      popd
+      git branch -D $branch_name
+      mkdir -p build/"$revision"
+      cp $tmp_dir/build/cargo_target/$(uname -m)-unknown-linux-$libc/$profile/* build/"$revision"
+      rm -rf $tmp_dir
+    fi
+
     return $ret
 }
 
@@ -530,14 +562,12 @@ ensure_ci_artifacts() {
 
     # Fetch all the artifacts so they are local
     say "Fetching CI artifacts from S3"
-    S3_URL=s3://spec.ccfc.min/firecracker-ci/v1.10/$(uname -m)
+    S3_URL=s3://spec.ccfc.min/firecracker-ci/v1.11/$(uname -m)
     ARTIFACTS=$MICROVM_IMAGES_DIR/$(uname -m)
     if [ ! -d "$ARTIFACTS" ]; then
         mkdir -pv $ARTIFACTS
         aws s3 sync --no-sign-request "$S3_URL" "$ARTIFACTS"
-        # fix permissions
-        find "$ARTIFACTS" -type f -name "*.id_rsa" |xargs chmod -c 400
-        find "$ARTIFACTS/firecracker" -type f |xargs chmod -c 755
+        cmd_sh "./tools/setup-ci-artifacts.sh"
     fi
 }
 
@@ -655,6 +685,7 @@ unapply_performance_tweaks() {
 cmd_test() {
     do_ab_test=0
     do_build=1
+    do_kvm_check=1
     # Parse any command line args.
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -676,6 +707,9 @@ cmd_test() {
             "--no-build")
                 do_build=0
                 ;;
+            "--no-kvm-check")
+                do_kvm_check=0
+                ;;
             "--")               { shift; break;     } ;;
             *)
                 die "Unknown argument: $1. Please use --help for help."
@@ -685,7 +719,7 @@ cmd_test() {
     done
 
     # Check prerequisites.
-    ensure_kvm
+    [ $do_kvm_check != 0 ] && ensure_kvm
     ensure_devctr
     ensure_build_dir
     ensure_ci_artifacts
@@ -856,6 +890,7 @@ cmd_sh() {
 
 cmd_sandbox() {
     cmd_build --release
+    ensure_ci_artifacts
     cmd_sh "tmux new env PYTEST_ADDOPTS=--pdbcls=IPython.terminal.debugger:TerminalPdb PYTHONPATH=tests IPYTHONDIR=\$PWD/.ipython ipython -i ./tools/sandbox.py $@"
 }
 
@@ -863,8 +898,8 @@ cmd_sandbox_native() {
     cmd_build --release
 
     source /etc/os-release
-    case $ID-$VERSION_ID in
-        ubuntu-22.04)
+    case $ID$VERSION_ID in
+        ubuntu22.04)
             sudo apt install python3-pip python3.11-dev gcc tmux
             ;;
         al2023)
@@ -873,7 +908,8 @@ cmd_sandbox_native() {
     esac
     python3.11 -m venv sandbox
     source sandbox/bin/activate
-    pip3.11 install ipython requests requests_unixsocket "urllib3<2" psutil tenacity filelock
+    pip3.11 install ipython requests requests_unixsocket2 psutil tenacity filelock
+    pip3.11 install jsonschema aws_embedded_metrics
     pip3.11 install packaging pytest
     ensure_ci_artifacts
     tmux neww sudo --preserve-env=HOME,PATH,TMUX env PYTHONPATH=tests IPYTHONDIR=\$PWD/.ipython ipython -i ./tools/sandbox.py $@
@@ -900,7 +936,7 @@ cmd_mkdocs() {
 }
 
 cmd_checkstyle() {
-    cmd_test --no-build -- integration_tests/style -n 4 --dist worksteal
+    cmd_test --no-build --no-kvm-check -- integration_tests/style -n 4 --dist worksteal
 }
 
 # Check if able to run firecracker.
@@ -1156,8 +1192,22 @@ cmd_install() {
     # Install the binaries
     for binary in "${binaries[@]}"; do
         say "Installing $binary in $install_path"
-        install -m 755 "$( build_bin_path "$target" "$profile" "$binary" )" "$install_path"
+        install -m 755 -D -t "$install_path" "$( build_bin_path "$target" "$profile" "$binary" )"
     done
+}
+
+cmd_build_ci_artifacts() {
+    # Check prerequisites
+    ensure_devctr
+
+    # We need to run nested Docker here, so run this container as privileged.
+    run_devctr \
+        --privileged \
+        --workdir "$CTR_FC_ROOT_DIR" \
+        -- \
+        ./resources/rebuild.sh "$@"
+
+    cmd_fix_perms
 }
 
 

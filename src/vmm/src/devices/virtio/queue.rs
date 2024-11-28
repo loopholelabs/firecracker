@@ -574,8 +574,16 @@ impl Queue {
         self.next_avail -= Wrapping(1);
     }
 
-    /// Puts an available descriptor head into the used ring for use by the guest.
-    pub fn add_used(&mut self, desc_index: u16, len: u32) -> Result<(), QueueError> {
+    /// Write used element into used_ring ring.
+    /// - [`ring_index_offset`] is an offset added to
+    /// the current [`self.next_used`] to obtain actual index
+    /// into used_ring.
+    pub fn write_used_element(
+        &mut self,
+        ring_index_offset: u16,
+        desc_index: u16,
+        len: u32,
+    ) -> Result<(), QueueError> {
         if self.actual_size() <= desc_index {
             error!(
                 "attempted to add out of bounds descriptor to used ring: {}",
@@ -584,7 +592,7 @@ impl Queue {
             return Err(QueueError::DescIndexOutOfBounds(desc_index));
         }
 
-        let next_used = self.next_used.0 % self.actual_size();
+        let next_used = (self.next_used + Wrapping(ring_index_offset)).0 % self.actual_size();
         let used_element = UsedElement {
             id: u32::from(desc_index),
             len,
@@ -594,14 +602,24 @@ impl Queue {
         unsafe {
             self.used_ring_ring_set(usize::from(next_used), used_element);
         }
+        Ok(())
+    }
 
-        self.num_added += Wrapping(1);
-        self.next_used += Wrapping(1);
+    /// Advance queue and used ring by `n` elements.
+    pub fn advance_used_ring(&mut self, n: u16) {
+        self.num_added += Wrapping(n);
+        self.next_used += Wrapping(n);
 
         // This fence ensures all descriptor writes are visible before the index update is.
         fence(Ordering::Release);
 
         self.used_ring_idx_set(self.next_used.0);
+    }
+
+    /// Puts an available descriptor head into the used ring for use by the guest.
+    pub fn add_used(&mut self, desc_index: u16, len: u32) -> Result<(), QueueError> {
+        self.write_used_element(0, desc_index, len)?;
+        self.advance_used_ring(1);
         Ok(())
     }
 
@@ -682,7 +700,6 @@ mod verification {
     use std::mem::ManuallyDrop;
     use std::num::Wrapping;
 
-    use vm_memory::guest_memory::GuestMemoryIterator;
     use vm_memory::{GuestMemoryRegion, MemoryRegionAddress};
 
     use super::*;
@@ -699,13 +716,8 @@ mod verification {
         the_region: vm_memory::GuestRegionMmap,
     }
 
-    impl<'a> GuestMemoryIterator<'a, vm_memory::GuestRegionMmap> for ProofGuestMemory {
-        type Iter = std::iter::Once<&'a vm_memory::GuestRegionMmap>;
-    }
-
     impl GuestMemory for ProofGuestMemory {
         type R = vm_memory::GuestRegionMmap;
-        type I = Self;
 
         fn num_regions(&self) -> usize {
             1
@@ -717,7 +729,7 @@ mod verification {
                 .map(|_| &self.the_region)
         }
 
-        fn iter(&self) -> <Self::I as GuestMemoryIterator<Self::R>>::Iter {
+        fn iter(&self) -> impl Iterator<Item = &Self::R> {
             std::iter::once(&self.the_region)
         }
 
