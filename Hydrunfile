@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -e
+
+# Rust
+if [ "$1" = "rust" ]; then
+    # Configure Git
+    git config --global --add safe.directory '*'
+
+    # Build
+    export RUSTFLAGS='-C target-feature=+crt-static'
+    cargo build --package firecracker --package jailer --package seccompiler --package rebase-snap --package cpu-template-helper --target "$2-unknown-linux-musl" --all-features --release
+
+    # Stage binaries
+    mkdir -p out
+
+    dir="./build/cargo_target/$2-unknown-linux-musl/release"
+    for file in $(ls "$dir"); do
+        if [[ -x "$dir/$file" && ! -d "$dir/$file" ]]; then
+            cp "$dir/$file" "./out/${file}.linux-$2"
+        fi
+    done
+
+    exit 0
+fi
