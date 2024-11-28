@@ -104,7 +104,7 @@ where
             irq_trigger: IrqTrigger::new().map_err(VsockError::EventFd)?,
             activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(VsockError::EventFd)?,
             device_state: DeviceState::Inactive,
-            rx_packet: VsockPacketRx::default(),
+            rx_packet: VsockPacketRx::new()?,
             tx_packet: VsockPacketTx::default(),
         })
     }
@@ -322,7 +322,7 @@ where
     fn write_config(&mut self, offset: u64, data: &[u8]) {
         METRICS.cfg_fails.inc();
         warn!(
-            "vsock: guest driver attempted to write device config (offset={:x}, len={:x})",
+            "vsock: guest driver attempted to write device config (offset={:#x}, len={:#x})",
             offset,
             data.len()
         );

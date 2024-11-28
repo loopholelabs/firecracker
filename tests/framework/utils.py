@@ -1,12 +1,14 @@
 # Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Generic utility functions that are used in the framework."""
+import errno
 import functools
 import json
 import logging
 import os
 import platform
 import re
+import select
 import signal
 import stat
 import subprocess
@@ -232,17 +234,14 @@ class CpuMap:
         #  - cgroupsv1: /cpuset.cpus
         #  - cgroupsv2: /cpuset.cpus.effective
         # For more details, see https://docs.kernel.org/admin-guide/cgroup-v2.html#cpuset-interface-files
-        cpulist = None
         for path in [
             Path("/sys/fs/cgroup/cpuset/cpuset.cpus"),
             Path("/sys/fs/cgroup/cpuset.cpus.effective"),
         ]:
             if path.exists():
-                cpulist = path.read_text("ascii").strip()
-                break
-        else:
-            raise RuntimeError("Could not find cgroups cpuset")
-        return ListFormatParser(cpulist).parse()
+                return ListFormatParser(path.read_text("ascii").strip()).parse()
+
+        raise RuntimeError("Could not find cgroups cpuset")
 
 
 class ListFormatParser:
@@ -380,7 +379,7 @@ def run_cmd(cmd, check=False, shell=True, cwd=None, timeout=None) -> CommandRetu
 
     :param cmd: command to execute
     :param check: whether a non-zero return code should result in a `ChildProcessError` or not.
-    :param no_shell: don't run the command in a sub-shell
+    :param shell: run the command in a sub-shell
     :param cwd: sets the current directory before the child is executed
     :param timeout: Time before command execution should be aborted with a `TimeoutExpired` exception
     :return: return code, stdout, stderr
@@ -414,8 +413,6 @@ def run_cmd(cmd, check=False, shell=True, cwd=None, timeout=None) -> CommandRetu
 
     # If a non-zero return code was thrown, raise an exception
     if check and proc.returncode != 0:
-        CMDLOG.warning("Command failed: %s\n", output_message)
-
         raise ChildProcessError(output_message)
 
     CMDLOG.debug(output_message)
@@ -450,16 +447,46 @@ def run_guest_cmd(ssh_connection, cmd, expected, use_json=False):
     assert stdout == expected
 
 
-@retry(wait=wait_fixed(1), stop=stop_after_attempt(10), reraise=True)
+def get_process_pidfd(pid):
+    """Get a pidfd file descriptor for the process with PID `pid`
+
+    Will return a pid file descriptor for the process with PID `pid` if it is
+    still alive. If the process has already exited we will receive either a
+    `ProcessLookupError` exception or and an `OSError` exception with errno `EINVAL`.
+    In these cases, we will return `None`.
+
+    Any other error while calling the system call, will raise an OSError
+    exception.
+    """
+    try:
+        pidfd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return None
+    except OSError as err:
+        if err.errno == errno.EINVAL:
+            return None
+
+        raise
+
+    return pidfd
+
+
 def wait_process_termination(p_pid):
     """Wait for a process to terminate.
 
-    Will return sucessfully if the process
+    Will return successfully if the process
     got indeed killed or raises an exception if the process
     is still alive after retrying several times.
     """
-    if psutil.pid_exists(p_pid):
-        raise Exception(f"[{p_pid}] process is still alive")
+    pidfd = get_process_pidfd(p_pid)
+
+    # If pidfd is None the process has already terminated
+    if pidfd is not None:
+        epoll = select.epoll()
+        epoll.register(pidfd, select.EPOLLIN)
+        # This will return once the process exits
+        epoll.poll()
+        os.close(pidfd)
 
 
 def get_firecracker_version_from_toml():

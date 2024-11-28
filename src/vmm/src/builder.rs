@@ -7,6 +7,8 @@
 use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::io::{self, Seek, SeekFrom};
+#[cfg(feature = "gdb")]
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use event_manager::{MutEventSubscriber, SubscriberOps};
@@ -56,6 +58,8 @@ use crate::devices::virtio::net::Net;
 use crate::devices::virtio::rng::Entropy;
 use crate::devices::virtio::vsock::{Vsock, VsockUnixBackend};
 use crate::devices::BusDevice;
+#[cfg(feature = "gdb")]
+use crate::gdb;
 use crate::logger::{debug, error};
 use crate::persist::{MicrovmState, MicrovmStateError};
 use crate::resources::VmResources;
@@ -128,6 +132,12 @@ pub enum StartMicrovmError {
     /// Error configuring ACPI: {0}
     #[cfg(target_arch = "x86_64")]
     Acpi(#[from] crate::acpi::AcpiError),
+    /// Error starting GDB debug session
+    #[cfg(feature = "gdb")]
+    GdbServer(gdb::target::GdbTargetError),
+    /// Error cloning Vcpu fds
+    #[cfg(feature = "gdb")]
+    VcpuFdCloneError(#[from] crate::vstate::vcpu::CopyKvmFdError),
 }
 
 /// It's convenient to automatically convert `linux_loader::cmdline::Error`s
@@ -249,7 +259,9 @@ pub fn build_microvm_for_boot(
     let request_ts = TimestampUs::default();
 
     let boot_config = vm_resources
-        .boot_source_builder()
+        .boot_source
+        .builder
+        .as_ref()
         .ok_or(MissingKernelConfig)?;
 
     let guest_memory = vm_resources
@@ -273,6 +285,18 @@ pub fn build_microvm_for_boot(
         vm_resources.vm_config.vcpu_count,
         cpu_template.kvm_capabilities.clone(),
     )?;
+
+    #[cfg(feature = "gdb")]
+    let (gdb_tx, gdb_rx) = mpsc::channel();
+    #[cfg(feature = "gdb")]
+    vcpus
+        .iter_mut()
+        .for_each(|vcpu| vcpu.attach_debug_info(gdb_tx.clone()));
+    #[cfg(feature = "gdb")]
+    let vcpu_fds = vcpus
+        .iter()
+        .map(|vcpu| vcpu.copy_kvm_vcpu_fd(vmm.vm()))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // The boot timer device needs to be the first device attached in order
     // to maintain the same MMIO address referenced in the documentation
@@ -321,16 +345,28 @@ pub fn build_microvm_for_boot(
         boot_cmdline,
     )?;
 
+    let vmm = Arc::new(Mutex::new(vmm));
+
+    #[cfg(feature = "gdb")]
+    if let Some(gdb_socket_path) = &vm_resources.vm_config.gdb_socket_path {
+        gdb::gdb_thread(vmm.clone(), vcpu_fds, gdb_rx, entry_addr, gdb_socket_path)
+            .map_err(GdbServer)?;
+    } else {
+        debug!("No GDB socket provided not starting gdb server.");
+    }
+
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
-    vmm.start_vcpus(
-        vcpus,
-        seccomp_filters
-            .get("vcpu")
-            .ok_or_else(|| MissingSeccompFilters("vcpu".to_string()))?
-            .clone(),
-    )
-    .map_err(VmmError::VcpuStart)
-    .map_err(Internal)?;
+    vmm.lock()
+        .unwrap()
+        .start_vcpus(
+            vcpus,
+            seccomp_filters
+                .get("vcpu")
+                .ok_or_else(|| MissingSeccompFilters("vcpu".to_string()))?
+                .clone(),
+        )
+        .map_err(VmmError::VcpuStart)
+        .map_err(Internal)?;
 
     // Load seccomp filters for the VMM thread.
     // Execution panics if filters cannot be loaded, use --no-seccomp if skipping filters
@@ -344,7 +380,6 @@ pub fn build_microvm_for_boot(
     .map_err(VmmError::SeccompFilters)
     .map_err(Internal)?;
 
-    let vmm = Arc::new(Mutex::new(vmm));
     event_manager.add_subscriber(vmm.clone());
 
     Ok(vmm)
@@ -475,7 +510,7 @@ pub fn build_microvm_from_snapshot(
     vmm.vm.restore_state(&microvm_state.vm_state)?;
 
     // Restore the boot source config paths.
-    vm_resources.set_boot_source_config(microvm_state.vm_info.boot_source);
+    vm_resources.boot_source.config = microvm_state.vm_info.boot_source;
 
     // Restore devices states.
     let mmio_ctor_args = MMIODevManagerConstructorArgs {

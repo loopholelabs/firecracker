@@ -12,6 +12,58 @@ and this project adheres to
 
 ### Changed
 
+- [#4913](https://github.com/firecracker-microvm/firecracker/pull/4913): Removed
+  unnecessary fields (`max_connections` and `max_pending_resets`) from the
+  snapshot format, bumping the snapshot version to 5.0.0. Users need to
+  regenerate snapshots.
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- [#4921](https://github.com/firecracker-microvm/firecracker/pull/4921): Fixed
+  swagger `CpuConfig` definition to include missing aarch64-specific fields.
+
+## \[1.10.1\]
+
+### Changed
+
+- [#4907](https://github.com/firecracker-microvm/firecracker/pull/4907): Bumped
+  the snapshot version to 4.0.0, so users need to regenerate snapshots.
+
+## \[1.10.0\]
+
+### Added
+
+- [#4834](https://github.com/firecracker-microvm/firecracker/pull/4834): Add
+  `VIRTIO_NET_F_RX_MRGBUF` support to the `virtio-net` device. When this feature
+  is negotiated, guest `virtio-net` driver can perform more efficient memory
+  management which in turn improves RX and TX performance.
+- [#4460](https://github.com/firecracker-microvm/firecracker/pull/4460): Add a
+  call to
+  [`KVM_KVMCLOCK_CTRL`](https://docs.kernel.org/virt/kvm/api.html#kvm-kvmclock-ctrl)
+  after pausing vCPUs on x86_64 architectures. This ioctl sets a flag in the KVM
+  state of the vCPU indicating that it has been paused by the host userspace. In
+  guests that use kvmclock, the soft lockup watchdog checks this flag. If it is
+  set, it won't trigger the lockup condition. Calling the ioctl for guests that
+  don't use kvmclock will fail. These failures are not fatal. We log the failure
+  and increase the `vcpu.kvmclock_ctrl_fails` metric.
+- [#4869](https://github.com/firecracker-microvm/firecracker/pull/4869): Added
+  support for Aarch64 systems which feature CPU caches with a number of sets
+  higher than `u16::MAX`.
+- [#4797](https://github.com/firecracker-microvm/firecracker/pull/4797),
+  [#4854](https://github.com/firecracker-microvm/firecracker/pull/4854): Added
+  GDB debugging support for a microVM guest kernel. Please see our
+  [GDB debugging documentation](docs/gdb-debugging.md) for more information.
+
+### Changed
+
+- [#4844](https://github.com/firecracker-microvm/firecracker/pull/4844): Upgrade
+  `virtio-net` device to use `readv` syscall to avoid unnecessary memory copies
+  on RX path, increasing the RX performance.
+
 ### Deprecated
 
 ### Removed

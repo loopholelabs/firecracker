@@ -9,11 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use super::device::Net;
-use super::{TapError, NET_NUM_QUEUES};
+use super::device::{Net, RxBuffers};
+use super::{TapError, NET_NUM_QUEUES, NET_QUEUE_MAX_SIZE, RX_INDEX};
 use crate::devices::virtio::device::DeviceState;
 use crate::devices::virtio::persist::{PersistError as VirtioStateError, VirtioDeviceState};
-use crate::devices::virtio::queue::FIRECRACKER_MAX_QUEUE_SIZE;
 use crate::devices::virtio::TYPE_NET;
 use crate::mmds::data_store::Mmds;
 use crate::mmds::ns::MmdsNetworkStack;
@@ -31,6 +30,27 @@ pub struct NetConfigSpaceState {
     guest_mac: Option<MacAddr>,
 }
 
+/// Information about the parsed RX buffers
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RxBufferState {
+    // Number of iovecs we have parsed from the guest
+    parsed_descriptor_chains_nr: u16,
+    // Number of used descriptors
+    used_descriptors: u16,
+    // Number of used bytes
+    used_bytes: u32,
+}
+
+impl RxBufferState {
+    fn from_rx_buffers(rx_buffer: &RxBuffers) -> Self {
+        RxBufferState {
+            parsed_descriptor_chains_nr: rx_buffer.parsed_descriptors.len().try_into().unwrap(),
+            used_descriptors: rx_buffer.used_descriptors,
+            used_bytes: rx_buffer.used_bytes,
+        }
+    }
+}
+
 /// Information about the network device that are saved
 /// at snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +63,7 @@ pub struct NetState {
     pub mmds_ns: Option<MmdsNetworkStackState>,
     config_space: NetConfigSpaceState,
     virtio_state: VirtioDeviceState,
+    rx_buffers_state: RxBufferState,
 }
 
 /// Auxiliary structure for creating a device when resuming from a snapshot.
@@ -85,6 +106,7 @@ impl Persist<'_> for Net {
                 guest_mac: self.guest_mac,
             },
             virtio_state: VirtioDeviceState::from_device(self),
+            rx_buffers_state: RxBufferState::from_rx_buffers(&self.rx_buffer),
         }
     }
 
@@ -124,7 +146,7 @@ impl Persist<'_> for Net {
             &constructor_args.mem,
             TYPE_NET,
             NET_NUM_QUEUES,
-            FIRECRACKER_MAX_QUEUE_SIZE,
+            NET_QUEUE_MAX_SIZE,
         )?;
         net.irq_trigger.irq_status = Arc::new(AtomicU32::new(state.virtio_state.interrupt_status));
         net.avail_features = state.virtio_state.avail_features;
@@ -137,6 +159,13 @@ impl Persist<'_> for Net {
                 .map_err(NetPersistError::TapSetOffload)?;
 
             net.device_state = DeviceState::Activated(constructor_args.mem);
+
+            // Recreate `Net::rx_buffer`. We do it by re-parsing the RX queue. We're temporarily
+            // rolling back `next_avail` in the RX queue and call `parse_rx_descriptors`.
+            net.queues[RX_INDEX].next_avail -= state.rx_buffers_state.parsed_descriptor_chains_nr;
+            net.parse_rx_descriptors();
+            net.rx_buffer.used_descriptors = state.rx_buffers_state.used_descriptors;
+            net.rx_buffer.used_bytes = state.rx_buffers_state.used_bytes;
         }
 
         Ok(net)

@@ -295,8 +295,9 @@ pub fn assign_queues(net: &mut Net, rxq: Queue, txq: Queue) {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::undocumented_unsafe_blocks)]
 pub mod test {
-    #![allow(clippy::undocumented_unsafe_blocks)]
     use std::os::unix::ffi::OsStrExt;
     use std::sync::{Arc, Mutex, MutexGuard};
     use std::{cmp, fmt};
@@ -310,7 +311,7 @@ pub mod test {
     use crate::devices::virtio::net::test_utils::{
         assign_queues, default_net, inject_tap_tx_frame, NetEvent, NetQueue,
     };
-    use crate::devices::virtio::net::{Net, RX_INDEX, TX_INDEX};
+    use crate::devices::virtio::net::{Net, MAX_BUFFER_SIZE, RX_INDEX, TX_INDEX};
     use crate::devices::virtio::queue::{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
     use crate::devices::virtio::test_utils::{VirtQueue, VirtqDesc};
     use crate::logger::IncMetric;
@@ -430,9 +431,10 @@ pub mod test {
             event_fd.write(1).unwrap();
         }
 
-        /// Generate a tap frame of `frame_len` and check that it is deferred
-        pub fn check_rx_deferred_frame(&mut self, frame_len: usize) -> Vec<u8> {
-            let used_idx = self.rxq.used.idx.get();
+        /// Generate a tap frame of `frame_len` and check that it is not read and
+        /// the descriptor chain has been discarded
+        pub fn check_rx_discarded_buffer(&mut self, frame_len: usize) -> Vec<u8> {
+            let old_used_descriptors = self.net().rx_buffer.used_descriptors;
 
             // Inject frame to tap and run epoll.
             let frame = inject_tap_tx_frame(&self.net(), frame_len);
@@ -441,10 +443,12 @@ pub mod test {
                 0,
                 self.event_manager.run_with_timeout(100).unwrap()
             );
-            // Check that the frame has been deferred.
-            assert!(self.net().rx_deferred_frame);
             // Check that the descriptor chain has been discarded.
-            assert_eq!(self.rxq.used.idx.get(), used_idx + 1);
+            assert_eq!(
+                self.net().rx_buffer.used_descriptors,
+                old_used_descriptors + 1
+            );
+
             assert!(&self.net().irq_trigger.has_pending_irq(IrqType::Vring));
 
             frame
@@ -453,16 +457,16 @@ pub mod test {
         /// Check that after adding a valid Rx queue descriptor chain a previously deferred frame
         /// is eventually received by the guest
         pub fn check_rx_queue_resume(&mut self, expected_frame: &[u8]) {
+            // Need to call this to flush all previous frame
+            // and advance RX queue.
+            self.net().finish_frame();
+
             let used_idx = self.rxq.used.idx.get();
             // Add a valid Rx avail descriptor chain and run epoll.
             self.add_desc_chain(
                 NetQueue::Rx,
                 0,
-                &[(
-                    0,
-                    u32::try_from(expected_frame.len()).unwrap(),
-                    VIRTQ_DESC_F_WRITE,
-                )],
+                &[(0, MAX_BUFFER_SIZE as u32, VIRTQ_DESC_F_WRITE)],
             );
             check_metric_after_block!(
                 self.net().metrics.rx_packets_count,
