@@ -4,16 +4,12 @@ set -e
 
 # Rust
 if [ "$1" = "rust" ]; then
-    # Install native dependencies
-    apk add rust cargo clang-dev cmake linux-headers make git
-
     # Configure Git
     git config --global --add safe.directory '*'
 
     # Build
-    cp "resources/seccomp/$2-unknown-linux-musl.json" "resources/seccomp/$2-alpine-linux-musl.json"
     export RUSTFLAGS='-C target-feature=+crt-static'
-    cargo build --package firecracker --package jailer --package seccompiler --package rebase-snap --package cpu-template-helper --target "$2-alpine-linux-musl" --all-features --release
+    cargo build --package firecracker --package jailer --package seccompiler --package rebase-snap --package cpu-template-helper --target "$2-unknown-linux-musl" --all-features --release
 
     # Stage binaries
     mkdir -p out
