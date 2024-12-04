@@ -561,8 +561,12 @@ impl KvmVcpu {
     }
 
     /// Scale the TSC frequency of this vCPU to the one provided as a parameter.
-    pub fn set_tsc_khz(&self, tsc_freq: u32) -> Result<(), SetTscError> {
-        self.fd.set_tsc_khz(tsc_freq).map_err(SetTscError)
+    pub fn set_tsc_khz(&self, _: u32) -> Result<(), SetTscError> {
+        // Disable TSC scaling when using PVM because it is unsupported on most virtualized platforms.
+        // Even on supported platforms like virtualized AMD CPUs, enabling TSC scaling can cause VM freezes
+        // after resuming from a snapshot.
+        // For more details, see https://github.com/virt-pvm/linux/issues/12#issue-2515360332
+        Ok(())
     }
 
     /// Use provided state to populate KVM internal state.
