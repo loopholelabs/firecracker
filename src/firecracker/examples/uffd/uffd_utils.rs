@@ -61,17 +61,30 @@ impl UffdHandler {
         let mut message_buf = vec![0u8; 1024];
         let (bytes_read, file) = stream
             .recv_with_fd(&mut message_buf[..])
-            .expect("Cannot recv_with_fd");
+            .expect("Cannot read from a stream");
         message_buf.resize(bytes_read, 0);
 
-        let body = String::from_utf8(message_buf).unwrap();
-        let file = file.expect("Uffd not passed through UDS!");
+        let body = String::from_utf8(message_buf.clone()).unwrap_or_else(|_| {
+            panic!(
+                "Received body is not a utf-8 valid string. Raw bytes received: {message_buf:#?}"
+            )
+        });
+        let file =
+            file.unwrap_or_else(|| panic!("Did not receive Uffd from UDS. Received body: {body}"));
 
-        let mappings = serde_json::from_str::<Vec<GuestRegionUffdMapping>>(&body)
-            .expect("Cannot deserialize memory mappings.");
+        let mappings =
+            serde_json::from_str::<Vec<GuestRegionUffdMapping>>(&body).unwrap_or_else(|_| {
+                panic!("Cannot deserialize memory mappings. Received body: {body}")
+            });
         let memsize: usize = mappings.iter().map(|r| r.size).sum();
         // Page size is the same for all memory regions, so just grab the first one
-        let page_size = mappings.first().unwrap().page_size_kib;
+        let first_mapping = mappings.first().unwrap_or_else(|| {
+            panic!(
+                "Cannot get the first mapping. Mappings size is {}. Received body: {body}",
+                mappings.len()
+            )
+        });
+        let page_size = first_mapping.page_size_kib;
 
         // Make sure memory size matches backing data size.
         assert_eq!(memsize, size);
@@ -103,7 +116,7 @@ impl UffdHandler {
         }
     }
 
-    pub fn serve_pf(&mut self, addr: *mut u8, len: usize) {
+    pub fn serve_pf(&mut self, addr: *mut u8, len: usize) -> bool {
         // Find the start of the page that the current faulting address belongs to.
         let dst = (addr as usize & !(self.page_size - 1)) as *mut libc::c_void;
         let fault_page_addr = dst as u64;
@@ -120,14 +133,18 @@ impl UffdHandler {
                 //    event was received. This can be a consequence of guest reclaiming back its
                 //    memory from the host (through balloon device)
                 Some(MemPageState::Uninitialized) | Some(MemPageState::FromFile) => {
-                    let (start, end) = self.populate_from_file(region, fault_page_addr, len);
-                    self.update_mem_state_mappings(start, end, MemPageState::FromFile);
-                    return;
+                    match self.populate_from_file(region, fault_page_addr, len) {
+                        Some((start, end)) => {
+                            self.update_mem_state_mappings(start, end, MemPageState::FromFile)
+                        }
+                        None => return false,
+                    }
+                    return true;
                 }
                 Some(MemPageState::Removed) | Some(MemPageState::Anonymous) => {
                     let (start, end) = self.zero_out(fault_page_addr);
                     self.update_mem_state_mappings(start, end, MemPageState::Anonymous);
-                    return;
+                    return true;
                 }
                 None => {}
             }
@@ -139,20 +156,39 @@ impl UffdHandler {
         );
     }
 
-    fn populate_from_file(&self, region: &MemRegion, dst: u64, len: usize) -> (u64, u64) {
+    fn populate_from_file(&self, region: &MemRegion, dst: u64, len: usize) -> Option<(u64, u64)> {
         let offset = dst - region.mapping.base_host_virt_addr;
         let src = self.backing_buffer as u64 + region.mapping.offset + offset;
 
         let ret = unsafe {
-            self.uffd
-                .copy(src as *const _, dst as *mut _, len, true)
-                .expect("Uffd copy failed")
+            match self.uffd.copy(src as *const _, dst as *mut _, len, true) {
+                Ok(value) => value,
+                // Catch EAGAIN errors, which occur when a `remove` event lands in the UFFD
+                // queue while we're processing `pagefault` events.
+                // The weird cast is because the `bytes_copied` field is based on the
+                // `uffdio_copy->copy` field, which is a signed 64 bit integer, and if something
+                // goes wrong, it gets set to a -errno code. However, uffd-rs always casts this
+                // value to an unsigned `usize`, which scrambled the errno.
+                Err(Error::PartiallyCopied(bytes_copied))
+                    if bytes_copied == 0 || bytes_copied == (-libc::EAGAIN) as usize =>
+                {
+                    return None
+                }
+                Err(Error::CopyFailed(errno))
+                    if std::io::Error::from(errno).raw_os_error().unwrap() == libc::EEXIST =>
+                {
+                    len
+                }
+                Err(e) => {
+                    panic!("Uffd copy failed: {e:?}");
+                }
+            }
         };
 
         // Make sure the UFFD copied some bytes.
         assert!(ret > 0);
 
-        (dst, dst + len as u64)
+        Some((dst, dst + len as u64))
     }
 
     fn zero_out(&mut self, addr: u64) -> (u64, u64) {
