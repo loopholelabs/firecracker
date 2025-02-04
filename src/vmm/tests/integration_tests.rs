@@ -26,7 +26,7 @@ use vmm::vmm_config::balloon::BalloonDeviceConfig;
 use vmm::vmm_config::boot_source::BootSourceConfig;
 use vmm::vmm_config::drive::BlockDeviceConfig;
 use vmm::vmm_config::instance_info::{InstanceInfo, VmState};
-use vmm::vmm_config::machine_config::{MachineConfig, MachineConfigUpdate, VmConfig};
+use vmm::vmm_config::machine_config::{MachineConfig, MachineConfigUpdate};
 use vmm::vmm_config::net::NetworkInterfaceConfig;
 use vmm::vmm_config::snapshot::{
     CreateSnapshotParams, LoadSnapshotParams, MemBackendConfig, MemBackendType, SnapshotType,
@@ -192,7 +192,7 @@ fn verify_create_snapshot(is_diff: bool) -> (TempFile, TempFile) {
 
     let (vmm, _) = create_vmm(Some(NOISY_KERNEL_IMAGE), is_diff, true);
     let resources = VmResources {
-        vm_config: VmConfig {
+        machine_config: MachineConfig {
             mem_size_mib: 1,
             track_dirty_pages: is_diff,
             ..Default::default()
@@ -412,6 +412,7 @@ fn test_preboot_load_snap_disallowed_after_boot_resources() {
     });
     verify_load_snap_disallowed_after_boot_resources(req, "SetVsockDevice");
 
-    let req = VmmAction::UpdateVmConfiguration(MachineConfigUpdate::from(MachineConfig::default()));
+    let req =
+        VmmAction::UpdateMachineConfiguration(MachineConfigUpdate::from(MachineConfig::default()));
     verify_load_snap_disallowed_after_boot_resources(req, "SetVmConfiguration");
 }
