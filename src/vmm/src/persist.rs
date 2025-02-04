@@ -5,7 +5,7 @@
 
 use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -521,9 +521,20 @@ fn snapshot_state_from_file(
     let snapshot = Snapshot::new(SNAPSHOT_VERSION);
     let mut snapshot_reader =
         File::open(snapshot_path).map_err(SnapshotStateFromFileError::Open)?;
-    let raw_snapshot_len: u64 =
-        Snapshot::deserialize(&mut snapshot_reader).map_err(SnapshotStateFromFileError::Meta)?;
+    let mut len_bytes = [0u8; 8];
+    snapshot_reader.read_exact(&mut len_bytes).unwrap();
+    println!("Read length bytes: {:?}", len_bytes);
+    let raw_snapshot_len = u64::from_le_bytes(len_bytes);
+    println!("Interpreted length: {}", raw_snapshot_len);
+
+    // Also, after reading the length, let's peek at the next few bytes:
+    let mut peek_buf = vec![0u8; 16];
+    snapshot_reader.read(&mut peek_buf).unwrap();
+    println!("Next few bytes after length: {:?}", peek_buf);
+    // Don't forget to seek back:
+    snapshot_reader.seek(SeekFrom::Current(-16)).unwrap();
     let snapshot_len = u64_to_usize(raw_snapshot_len);
+    println!("Reading file with len {raw_snapshot_len} {snapshot_len}");
     let state: MicrovmState = snapshot
         .load_with_version_check(&mut snapshot_reader, snapshot_len)
         .map_err(SnapshotStateFromFileError::Load)?;

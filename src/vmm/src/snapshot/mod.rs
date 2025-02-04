@@ -25,6 +25,7 @@
 //! provided by the library clients (it is not tied to this crate).
 pub mod crc;
 mod persist;
+use std::cmp::min;
 use std::fmt::Debug;
 use std::io::{Read, Write};
 
@@ -218,9 +219,20 @@ impl Snapshot {
         crc_writer.flush().map_err(|_| SnapshotError::Flush)?;
 
         let snapshot_len = snapshot_buf.len() as u64;
-        Self::serialize(writer, &snapshot_len)?;
+        println!("About to write length: {}", snapshot_len);
+        println!("Length bytes: {:?}", snapshot_len.to_le_bytes());
+        writer.write_all(&snapshot_len.to_le_bytes()).unwrap();
+        println!("Writing snapshot buffer of size: {}", snapshot_buf.len());
+        println!(
+            "First few bytes of snapshot: {:?}",
+            &snapshot_buf[..min(16, snapshot_buf.len())]
+        );
 
-        writer.write_all(&snapshot_buf).map_err(|_| SnapshotError::Write)
+        println!("Writing file with len {snapshot_len}");
+
+        writer
+            .write_all(&snapshot_buf)
+            .map_err(|_| SnapshotError::Write)
     }
 
     /// Save a snapshot with no CRC64 checksum included.
