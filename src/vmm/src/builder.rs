@@ -19,7 +19,6 @@ use linux_loader::loader::elf::Elf as Loader;
 #[cfg(target_arch = "aarch64")]
 use linux_loader::loader::pe::PE as Loader;
 use linux_loader::loader::KernelLoader;
-use seccompiler::BpfThreadMap;
 use userfaultfd::Uffd;
 use utils::time::TimestampUs;
 use vm_memory::ReadVolatile;
@@ -63,11 +62,13 @@ use crate::gdb;
 use crate::logger::{debug, error};
 use crate::persist::{MicrovmState, MicrovmStateError};
 use crate::resources::VmResources;
+use crate::seccomp::BpfThreadMap;
 use crate::snapshot::Persist;
 use crate::utils::u64_to_usize;
 use crate::vmm_config::boot_source::BootConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
-use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
+use crate::vmm_config::machine_config::{MachineConfig, MachineConfigError};
+use crate::vstate::kvm::Kvm;
 use crate::vstate::memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 use crate::vstate::vcpu::{Vcpu, VcpuConfig, VcpuError};
 use crate::vstate::vm::Vm;
@@ -124,7 +125,7 @@ pub enum StartMicrovmError {
     /// Cannot restore microvm state: {0}
     RestoreMicrovmState(MicrovmStateError),
     /// Cannot set vm resources: {0}
-    SetVmResources(VmConfigError),
+    SetVmResources(MachineConfigError),
     /// Cannot create the entropy device: {0}
     CreateEntropyDevice(crate::devices::virtio::rng::EntropyError),
     /// Failed to allocate guest resource: {0}
@@ -154,18 +155,23 @@ fn create_vmm_and_vcpus(
     event_manager: &mut EventManager,
     guest_memory: GuestMemoryMmap,
     uffd: Option<Uffd>,
-    track_dirty_pages: bool,
     vcpu_count: u8,
     kvm_capabilities: Vec<KvmCapability>,
 ) -> Result<(Vmm, Vec<Vcpu>), StartMicrovmError> {
     use self::StartMicrovmError::*;
 
+    let kvm = Kvm::new(kvm_capabilities)
+        .map_err(VmmError::Kvm)
+        .map_err(StartMicrovmError::Internal)?;
     // Set up Kvm Vm and register memory regions.
     // Build custom CPU config if a custom template is provided.
-    let mut vm = Vm::new(kvm_capabilities)
+    let mut vm = Vm::new(&kvm)
         .map_err(VmmError::Vm)
         .map_err(StartMicrovmError::Internal)?;
-    vm.memory_init(&guest_memory, track_dirty_pages)
+    kvm.check_memory(&guest_memory)
+        .map_err(VmmError::Kvm)
+        .map_err(StartMicrovmError::Internal)?;
+    vm.memory_init(&guest_memory)
         .map_err(VmmError::Vm)
         .map_err(StartMicrovmError::Internal)?;
 
@@ -186,7 +192,7 @@ fn create_vmm_and_vcpus(
     #[cfg(target_arch = "x86_64")]
     let (vcpus, pio_device_manager) = {
         setup_interrupt_controller(&mut vm)?;
-        let vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
+        let vcpus = create_vcpus(&kvm, &vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
 
         // Make stdout non blocking.
         set_stdout_nonblocking();
@@ -218,7 +224,7 @@ fn create_vmm_and_vcpus(
     // Search for `kvm_arch_vcpu_create` in arch/arm/kvm/arm.c.
     #[cfg(target_arch = "aarch64")]
     let vcpus = {
-        let vcpus = create_vcpus(&vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
+        let vcpus = create_vcpus(&kvm, &vm, vcpu_count, &vcpus_exit_evt).map_err(Internal)?;
         setup_interrupt_controller(&mut vm, vcpu_count)?;
         vcpus
     };
@@ -227,6 +233,7 @@ fn create_vmm_and_vcpus(
         events_observer: Some(std::io::stdin()),
         instance_info: instance_info.clone(),
         shutdown_exit_code: None,
+        kvm,
         vm,
         guest_memory,
         uffd,
@@ -274,15 +281,17 @@ pub fn build_microvm_for_boot(
     #[allow(unused_mut)]
     let mut boot_cmdline = boot_config.cmdline.clone();
 
-    let cpu_template = vm_resources.vm_config.cpu_template.get_cpu_template()?;
+    let cpu_template = vm_resources
+        .machine_config
+        .cpu_template
+        .get_cpu_template()?;
 
     let (mut vmm, mut vcpus) = create_vmm_and_vcpus(
         instance_info,
         event_manager,
         guest_memory,
         None,
-        vm_resources.vm_config.track_dirty_pages,
-        vm_resources.vm_config.vcpu_count,
+        vm_resources.machine_config.vcpu_count,
         cpu_template.kvm_capabilities.clone(),
     )?;
 
@@ -338,7 +347,7 @@ pub fn build_microvm_for_boot(
     configure_system_for_boot(
         &mut vmm,
         vcpus.as_mut(),
-        &vm_resources.vm_config,
+        &vm_resources.machine_config,
         &cpu_template,
         entry_addr,
         &initrd,
@@ -348,7 +357,7 @@ pub fn build_microvm_for_boot(
     let vmm = Arc::new(Mutex::new(vmm));
 
     #[cfg(feature = "gdb")]
-    if let Some(gdb_socket_path) = &vm_resources.vm_config.gdb_socket_path {
+    if let Some(gdb_socket_path) = &vm_resources.machine_config.gdb_socket_path {
         gdb::gdb_thread(vmm.clone(), vcpu_fds, gdb_rx, entry_addr, gdb_socket_path)
             .map_err(GdbServer)?;
     } else {
@@ -372,7 +381,7 @@ pub fn build_microvm_for_boot(
     // Execution panics if filters cannot be loaded, use --no-seccomp if skipping filters
     // altogether is the desired behaviour.
     // Keep this as the last step before resuming vcpus.
-    seccompiler::apply_filter(
+    crate::seccomp::apply_filter(
         seccomp_filters
             .get("vmm")
             .ok_or_else(|| MissingSeccompFilters("vmm".to_string()))?,
@@ -429,7 +438,7 @@ pub enum BuildMicrovmFromSnapshotError {
     /// Failed to restore microVM state: {0}
     RestoreState(#[from] crate::vstate::vm::RestoreStateError),
     /// Failed to update microVM configuration: {0}
-    VmUpdateConfig(#[from] VmConfigError),
+    VmUpdateConfig(#[from] MachineConfigError),
     /// Failed to restore MMIO device: {0}
     RestoreMmioDevice(#[from] MicrovmStateError),
     /// Failed to emulate MMIO serial: {0}
@@ -443,7 +452,7 @@ pub enum BuildMicrovmFromSnapshotError {
     /// Failed to apply VMM secccomp filter as none found.
     MissingVmmSeccompFilters,
     /// Failed to apply VMM secccomp filter: {0}
-    SeccompFiltersInternal(#[from] seccompiler::InstallationError),
+    SeccompFiltersInternal(#[from] crate::seccomp::InstallationError),
     /// Failed to restore ACPI device manager: {0}
     ACPIDeviManager(#[from] ACPIDeviceManagerRestoreError),
     /// VMGenID update failed: {0}
@@ -469,11 +478,10 @@ pub fn build_microvm_from_snapshot(
     let (mut vmm, mut vcpus) = create_vmm_and_vcpus(
         instance_info,
         event_manager,
-        guest_memory.clone(),
+        guest_memory,
         uffd,
-        vm_resources.vm_config.track_dirty_pages,
-        vm_resources.vm_config.vcpu_count,
-        microvm_state.vm_state.kvm_cap_modifiers.clone(),
+        vm_resources.machine_config.vcpu_count,
+        microvm_state.kvm_state.kvm_cap_modifiers.clone(),
     )?;
 
     #[cfg(target_arch = "x86_64")]
@@ -514,12 +522,13 @@ pub fn build_microvm_from_snapshot(
 
     // Restore devices states.
     let mmio_ctor_args = MMIODevManagerConstructorArgs {
-        mem: &guest_memory,
+        mem: &vmm.guest_memory,
         vm: vmm.vm.fd(),
         event_manager,
         resource_allocator: &mut vmm.resource_allocator,
         vm_resources,
         instance_id: &instance_info.id,
+        restored_from_file: vmm.uffd.is_none(),
     };
 
     vmm.mmio_device_manager =
@@ -529,7 +538,7 @@ pub fn build_microvm_from_snapshot(
 
     {
         let acpi_ctor_args = ACPIDeviceManagerConstructorArgs {
-            mem: &guest_memory,
+            mem: &vmm.guest_memory,
             resource_allocator: &mut vmm.resource_allocator,
             vm: vmm.vm.fd(),
         };
@@ -559,7 +568,7 @@ pub fn build_microvm_from_snapshot(
 
     // Load seccomp filters for the VMM thread.
     // Keep this as the last step of the building process.
-    seccompiler::apply_filter(
+    crate::seccomp::apply_filter(
         seccomp_filters
             .get("vmm")
             .ok_or(BuildMicrovmFromSnapshotError::MissingVmmSeccompFilters)?,
@@ -735,11 +744,16 @@ fn attach_legacy_devices_aarch64(
         .map_err(VmmError::RegisterMMIODevice)
 }
 
-fn create_vcpus(vm: &Vm, vcpu_count: u8, exit_evt: &EventFd) -> Result<Vec<Vcpu>, VmmError> {
+fn create_vcpus(
+    kvm: &Kvm,
+    vm: &Vm,
+    vcpu_count: u8,
+    exit_evt: &EventFd,
+) -> Result<Vec<Vcpu>, VmmError> {
     let mut vcpus = Vec::with_capacity(vcpu_count as usize);
     for cpu_idx in 0..vcpu_count {
         let exit_evt = exit_evt.try_clone().map_err(VmmError::EventFd)?;
-        let vcpu = Vcpu::new(cpu_idx, vm, exit_evt).map_err(VmmError::VcpuCreate)?;
+        let vcpu = Vcpu::new(cpu_idx, vm, kvm, exit_evt).map_err(VmmError::VcpuCreate)?;
         vcpus.push(vcpu);
     }
     Ok(vcpus)
@@ -750,7 +764,7 @@ fn create_vcpus(vm: &Vm, vcpu_count: u8, exit_evt: &EventFd) -> Result<Vec<Vcpu>
 pub fn configure_system_for_boot(
     vmm: &mut Vmm,
     vcpus: &mut [Vcpu],
-    vm_config: &VmConfig,
+    machine_config: &MachineConfig,
     cpu_template: &CustomCpuTemplate,
     entry_addr: GuestAddress,
     initrd: &Option<InitrdConfig>,
@@ -762,7 +776,7 @@ pub fn configure_system_for_boot(
     #[cfg(target_arch = "x86_64")]
     let cpu_config = {
         use crate::cpu_config::x86_64::cpuid;
-        let cpuid = cpuid::Cpuid::try_from(vmm.vm.supported_cpuid().clone())
+        let cpuid = cpuid::Cpuid::try_from(vmm.kvm.supported_cpuid.clone())
             .map_err(GuestConfigError::CpuidFromKvmCpuid)?;
         let msrs = vcpus[0]
             .kvm_vcpu
@@ -793,21 +807,21 @@ pub fn configure_system_for_boot(
     let cpu_config = CpuConfiguration::apply_template(cpu_config, cpu_template)?;
 
     let vcpu_config = VcpuConfig {
-        vcpu_count: vm_config.vcpu_count,
-        smt: vm_config.smt,
+        vcpu_count: machine_config.vcpu_count,
+        smt: machine_config.smt,
         cpu_config,
     };
 
-    // Configure vCPUs with normalizing and setting the generated CPU configuration.
-    for vcpu in vcpus.iter_mut() {
-        vcpu.kvm_vcpu
-            .configure(vmm.guest_memory(), entry_addr, &vcpu_config)
-            .map_err(VmmError::VcpuConfigure)
-            .map_err(Internal)?;
-    }
-
     #[cfg(target_arch = "x86_64")]
     {
+        // Configure vCPUs with normalizing and setting the generated CPU configuration.
+        for vcpu in vcpus.iter_mut() {
+            vcpu.kvm_vcpu
+                .configure(vmm.guest_memory(), entry_addr, &vcpu_config)
+                .map_err(VmmError::VcpuConfigure)
+                .map_err(Internal)?;
+        }
+
         // Write the kernel command line to guest memory. This is x86_64 specific, since on
         // aarch64 the command line will be specified through the FDT.
         let cmdline_size = boot_cmdline
@@ -842,6 +856,19 @@ pub fn configure_system_for_boot(
     }
     #[cfg(target_arch = "aarch64")]
     {
+        let optional_capabilities = vmm.kvm.optional_capabilities();
+        // Configure vCPUs with normalizing and setting the generated CPU configuration.
+        for vcpu in vcpus.iter_mut() {
+            vcpu.kvm_vcpu
+                .configure(
+                    vmm.guest_memory(),
+                    entry_addr,
+                    &vcpu_config,
+                    &optional_capabilities,
+                )
+                .map_err(VmmError::VcpuConfigure)
+                .map_err(Internal)?;
+        }
         let vcpu_mpidr = vcpus
             .iter_mut()
             .map(|cpu| cpu.kvm_vcpu.get_mpidr())
@@ -1108,8 +1135,9 @@ pub(crate) mod tests {
             .map_err(StartMicrovmError::Internal)
             .unwrap();
 
-        let mut vm = Vm::new(vec![]).unwrap();
-        vm.memory_init(&guest_memory, false).unwrap();
+        let kvm = Kvm::new(vec![]).unwrap();
+        let mut vm = Vm::new(&kvm).unwrap();
+        vm.memory_init(&guest_memory).unwrap();
         let mmio_device_manager = MMIODeviceManager::new();
         let acpi_device_manager = ACPIDeviceManager::new();
         #[cfg(target_arch = "x86_64")]
@@ -1134,7 +1162,7 @@ pub(crate) mod tests {
         #[cfg(target_arch = "aarch64")]
         {
             let exit_evt = EventFd::new(libc::EFD_NONBLOCK).unwrap();
-            let _vcpu = Vcpu::new(1, &vm, exit_evt).unwrap();
+            let _vcpu = Vcpu::new(1, &vm, &kvm, exit_evt).unwrap();
             setup_interrupt_controller(&mut vm, 1).unwrap();
         }
 
@@ -1142,6 +1170,7 @@ pub(crate) mod tests {
             events_observer: Some(std::io::stdin()),
             instance_info: InstanceInfo::default(),
             shutdown_exit_code: None,
+            kvm,
             vm,
             guest_memory,
             uffd: None,
@@ -1305,7 +1334,7 @@ pub(crate) mod tests {
         use crate::vstate::memory::GuestMemory;
         let image = make_test_bin();
 
-        let mem_size: usize = image.len() * 2 + crate::arch::PAGE_SIZE;
+        let mem_size: usize = image.len() * 2 + crate::arch::GUEST_PAGE_SIZE;
 
         let tempfile = TempFile::new().unwrap();
         let mut tempfile = tempfile.into_file();
@@ -1344,7 +1373,7 @@ pub(crate) mod tests {
         let tempfile = TempFile::new().unwrap();
         let mut tempfile = tempfile.into_file();
         tempfile.write_all(&image).unwrap();
-        let gm = single_region_mem_at(crate::arch::PAGE_SIZE as u64 + 1, image.len() * 2);
+        let gm = single_region_mem_at(crate::arch::GUEST_PAGE_SIZE as u64 + 1, image.len() * 2);
 
         let res = load_initrd(&gm, &mut tempfile);
         assert!(
@@ -1359,15 +1388,16 @@ pub(crate) mod tests {
         let vcpu_count = 2;
         let guest_memory = arch_mem(128 << 20);
 
+        let kvm = Kvm::new(vec![]).expect("Cannot create Kvm");
         #[allow(unused_mut)]
-        let mut vm = Vm::new(vec![]).unwrap();
-        vm.memory_init(&guest_memory, false).unwrap();
+        let mut vm = Vm::new(&kvm).unwrap();
+        vm.memory_init(&guest_memory).unwrap();
         let evfd = EventFd::new(libc::EFD_NONBLOCK).unwrap();
 
         #[cfg(target_arch = "x86_64")]
         setup_interrupt_controller(&mut vm).unwrap();
 
-        let vcpu_vec = create_vcpus(&vm, vcpu_count, &evfd).unwrap();
+        let vcpu_vec = create_vcpus(&kvm, &vm, vcpu_count, &evfd).unwrap();
         assert_eq!(vcpu_vec.len(), vcpu_count as usize);
     }
 

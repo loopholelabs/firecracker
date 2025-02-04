@@ -24,6 +24,7 @@ fn main() {
     let (stream, _) = listener.accept().expect("Cannot listen on UDS socket");
 
     let mut runtime = Runtime::new(stream, file);
+    runtime.install_panic_hook();
     runtime.run(|uffd_handler: &mut UffdHandler| {
         // Read an event from the userfaultfd.
         let event = uffd_handler
@@ -35,7 +36,7 @@ fn main() {
             userfaultfd::Event::Pagefault { .. } => {
                 for region in uffd_handler.mem_regions.clone() {
                     uffd_handler
-                        .serve_pf(region.mapping.base_host_virt_addr as _, region.mapping.size)
+                        .serve_pf(region.mapping.base_host_virt_addr as _, region.mapping.size);
                 }
             }
             _ => panic!("Unexpected event on userfaultfd"),

@@ -11,7 +11,6 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use seccompiler::BpfThreadMap;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use userfaultfd::{FeatureFlags, Uffd, UffdBuilder};
@@ -28,14 +27,16 @@ use crate::cpu_config::x86_64::cpuid::CpuidTrait;
 use crate::device_manager::persist::{ACPIDeviceManagerState, DevicePersistError, DeviceStates};
 use crate::logger::{info, warn};
 use crate::resources::VmResources;
+use crate::seccomp::BpfThreadMap;
 use crate::snapshot::Snapshot;
 use crate::utils::u64_to_usize;
 use crate::vmm_config::boot_source::BootSourceConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
-use crate::vmm_config::machine_config::{HugePageConfig, MachineConfigUpdate, VmConfigError};
+use crate::vmm_config::machine_config::{HugePageConfig, MachineConfigError, MachineConfigUpdate};
 use crate::vmm_config::snapshot::{
     CreateSnapshotParams, LoadSnapshotParams, MemBackendType, SnapshotType,
 };
+use crate::vstate::kvm::KvmState;
 use crate::vstate::memory::{
     GuestMemory, GuestMemoryExtension, GuestMemoryMmap, GuestMemoryState, MemoryError,
 };
@@ -61,11 +62,11 @@ pub struct VmInfo {
 impl From<&VmResources> for VmInfo {
     fn from(value: &VmResources) -> Self {
         Self {
-            mem_size_mib: value.vm_config.mem_size_mib as u64,
-            smt: value.vm_config.smt,
-            cpu_template: StaticCpuTemplate::from(&value.vm_config.cpu_template),
+            mem_size_mib: value.machine_config.mem_size_mib as u64,
+            smt: value.machine_config.smt,
+            cpu_template: StaticCpuTemplate::from(&value.machine_config.cpu_template),
             boot_source: value.boot_source.config.clone(),
-            huge_pages: value.vm_config.huge_pages,
+            huge_pages: value.machine_config.huge_pages,
         }
     }
 }
@@ -77,6 +78,8 @@ pub struct MicrovmState {
     pub vm_info: VmInfo,
     /// Memory state.
     pub memory_state: GuestMemoryState,
+    /// KVM KVM state.
+    pub kvm_state: KvmState,
     /// VM KVM state.
     pub vm_state: VmState,
     /// Vcpu states.
@@ -444,11 +447,11 @@ pub fn restore_from_snapshot(
         .vcpu_states
         .len()
         .try_into()
-        .map_err(|_| VmConfigError::InvalidVcpuCount)
+        .map_err(|_| MachineConfigError::InvalidVcpuCount)
         .map_err(BuildMicrovmFromSnapshotError::VmUpdateConfig)?;
 
     vm_resources
-        .update_vm_config(&MachineConfigUpdate {
+        .update_machine_config(&MachineConfigUpdate {
             vcpu_count: Some(vcpu_count),
             mem_size_mib: Some(u64_to_usize(microvm_state.vm_info.mem_size_mib)),
             smt: Some(microvm_state.vm_info.smt),
@@ -467,17 +470,24 @@ pub fn restore_from_snapshot(
     let mem_state = &microvm_state.memory_state;
 
     let (guest_memory, uffd) = match params.mem_backend.backend_type {
-        MemBackendType::File => (
-            guest_memory_from_file(
-                mem_backend_path,
-                mem_state,
-                track_dirty_pages,
-                vm_resources.vm_config.huge_pages,
-                params.shared,
+        MemBackendType::File => {
+            if vm_resources.machine_config.huge_pages.is_hugetlbfs() {
+                return Err(RestoreFromSnapshotGuestMemoryError::File(
+                    GuestMemoryFromFileError::HugetlbfsSnapshot,
+                )
+                .into());
+            }
+            (
+                guest_memory_from_file(
+                    mem_backend_path,
+                    mem_state,
+                    track_dirty_pages,
+                    params.shared,
+                )
+                .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
+                None,
             )
-            .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
-            None,
-        ),
+        }
         MemBackendType::Uffd => guest_memory_from_uffd(
             mem_backend_path,
             mem_state,
@@ -485,7 +495,7 @@ pub fn restore_from_snapshot(
             // We enable the UFFD_FEATURE_EVENT_REMOVE feature only if a balloon device
             // is present in the microVM state.
             microvm_state.device_states.balloon_device.is_some(),
-            vm_resources.vm_config.huge_pages,
+            vm_resources.machine_config.huge_pages,
         )
         .map_err(RestoreFromSnapshotGuestMemoryError::Uffd)?,
     };
@@ -534,13 +544,14 @@ pub enum GuestMemoryFromFileError {
     File(#[from] std::io::Error),
     /// Failed to restore guest memory: {0}
     Restore(#[from] MemoryError),
+    /// Cannot restore hugetlbfs backed snapshot by mapping the memory file. Please use uffd.
+    HugetlbfsSnapshot,
 }
 
 fn guest_memory_from_file(
     mem_file_path: &Path,
     mem_state: &GuestMemoryState,
     track_dirty_pages: bool,
-    huge_pages: HugePageConfig,
     shared: bool,
 ) -> Result<GuestMemoryMmap, GuestMemoryFromFileError> {
     let mem_file = if shared {
@@ -552,13 +563,7 @@ fn guest_memory_from_file(
         File::open(mem_file_path)?
     };
 
-    let guest_mem = GuestMemoryMmap::from_state(
-        Some(&mem_file),
-        mem_state,
-        track_dirty_pages,
-        huge_pages,
-        shared,
-    )?;
+    let guest_mem = GuestMemoryMmap::snapshot_file(mem_file, mem_state, track_dirty_pages, shared)?;
     Ok(guest_mem)
 }
 
@@ -618,15 +623,17 @@ fn create_guest_memory(
     huge_pages: HugePageConfig,
 ) -> Result<(GuestMemoryMmap, Vec<GuestRegionUffdMapping>), GuestMemoryFromUffdError> {
     let guest_memory =
-        GuestMemoryMmap::from_state(None, mem_state, track_dirty_pages, huge_pages, false)?;
+        GuestMemoryMmap::anonymous(mem_state.regions(), track_dirty_pages, huge_pages)?;
     let mut backend_mappings = Vec::with_capacity(guest_memory.num_regions());
-    for (mem_region, state_region) in guest_memory.iter().zip(mem_state.regions.iter()) {
+    let mut offset = 0;
+    for mem_region in guest_memory.iter() {
         backend_mappings.push(GuestRegionUffdMapping {
             base_host_virt_addr: mem_region.as_ptr() as u64,
             size: mem_region.size(),
-            offset: state_region.offset,
+            offset,
             page_size_kib: huge_pages.page_size_kib(),
         });
+        offset += mem_region.size() as u64;
     }
 
     Ok((guest_memory, backend_mappings))
@@ -775,6 +782,7 @@ mod tests {
             device_states: states,
             memory_state,
             vcpu_states,
+            kvm_state: Default::default(),
             vm_info: VmInfo {
                 mem_size_mib: 1u64,
                 ..Default::default()
@@ -805,7 +813,6 @@ mod tests {
             regions: vec![GuestMemoryRegionState {
                 base_address: 0,
                 size: 0x20000,
-                offset: 0x10000,
             }],
         };
 
@@ -814,7 +821,7 @@ mod tests {
 
         assert_eq!(uffd_regions.len(), 1);
         assert_eq!(uffd_regions[0].size, 0x20000);
-        assert_eq!(uffd_regions[0].offset, 0x10000);
+        assert_eq!(uffd_regions[0].offset, 0);
         assert_eq!(
             uffd_regions[0].page_size_kib,
             HugePageConfig::None.page_size_kib()

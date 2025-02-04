@@ -10,7 +10,7 @@ use vmm_sys_util::tempdir::TempDir;
 
 use crate::builder::build_microvm_for_boot;
 use crate::resources::VmResources;
-use crate::seccomp_filters::get_empty_filters;
+use crate::seccomp::get_empty_filters;
 use crate::test_utils::mock_resources::{MockBootSourceConfig, MockVmConfig, MockVmResources};
 use crate::vmm_config::boot_source::BootSourceConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
@@ -34,7 +34,7 @@ pub fn single_region_mem_at(at: u64, size: usize) -> GuestMemoryMmap {
 
 /// Creates a [`GuestMemoryMmap`] with multiple regions and without dirty page tracking.
 pub fn multi_region_mem(regions: &[(GuestAddress, usize)]) -> GuestMemoryMmap {
-    GuestMemoryMmap::from_raw_regions(regions, false, HugePageConfig::None)
+    GuestMemoryMmap::anonymous(regions.iter().copied(), false, HugePageConfig::None)
         .expect("Cannot initialize memory")
 }
 

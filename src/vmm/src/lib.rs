@@ -97,7 +97,7 @@ pub mod resources;
 /// microVM RPC API adapters.
 pub mod rpc_interface;
 /// Seccomp filter utilities.
-pub mod seccomp_filters;
+pub mod seccomp;
 /// Signal handling utilities.
 pub mod signal_handler;
 /// Serialization and deserialization facilities
@@ -122,11 +122,12 @@ use device_manager::acpi::ACPIDeviceManager;
 use device_manager::resources::ResourceAllocator;
 use devices::acpi::vmgenid::VmGenIdError;
 use event_manager::{EventManager as BaseEventManager, EventOps, Events, MutEventSubscriber};
-use seccompiler::BpfProgram;
+use seccomp::BpfProgram;
 use userfaultfd::Uffd;
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::terminal::Terminal;
+use vstate::kvm::Kvm;
 use vstate::vcpu::{self, KvmVcpuConfigureError, StartThreadedError, VcpuSendEventError};
 
 use crate::arch::DeviceType;
@@ -225,7 +226,7 @@ pub enum VmmError {
     /// Cannot add a device to the MMIO Bus. {0}
     RegisterMMIODevice(device_manager::mmio::MmioError),
     /// Cannot install seccomp filters: {0}
-    SeccompFilters(seccompiler::InstallationError),
+    SeccompFilters(seccomp::InstallationError),
     /// Error writing to the serial console: {0}
     Serial(io::Error),
     /// Error creating timer fd: {0}
@@ -255,6 +256,8 @@ pub enum VmmError {
     VcpuSpawn(io::Error),
     /// Vm error: {0}
     Vm(vstate::vm::VmError),
+    /// Kvm error: {0}
+    Kvm(vstate::kvm::KvmError),
     /// Error thrown by observer object on Vmm initialization: {0}
     VmmObserverInit(vmm_sys_util::errno::Error),
     /// Error thrown by observer object on Vmm teardown: {0}
@@ -307,11 +310,10 @@ pub struct Vmm {
     shutdown_exit_code: Option<FcExitCode>,
 
     // Guest VM core resources.
+    kvm: Kvm,
     vm: Vm,
     guest_memory: GuestMemoryMmap,
     // Save UFFD in order to keep it open in the Firecracker process, as well.
-    // Since this field is never read again, we need to allow `dead_code`.
-    #[allow(dead_code)]
     uffd: Option<Uffd>,
     vcpus_handles: Vec<VcpuHandle>,
     // Used by Vcpus and devices to initiate teardown; Vmm should never write here.
@@ -511,6 +513,7 @@ impl Vmm {
     pub fn save_state(&mut self, vm_info: &VmInfo) -> Result<MicrovmState, MicrovmStateError> {
         use self::MicrovmStateError::SaveVmState;
         let vcpu_states = self.save_vcpu_states()?;
+        let kvm_state = self.kvm.save_state();
         let vm_state = {
             #[cfg(target_arch = "x86_64")]
             {
@@ -531,6 +534,7 @@ impl Vmm {
         Ok(MicrovmState {
             vm_info: vm_info.clone(),
             memory_state,
+            kvm_state,
             vm_state,
             vcpu_states,
             device_states,
@@ -623,18 +627,6 @@ impl Vmm {
             })
             .map_err(VmmError::DirtyBitmap)?;
         Ok(bitmap)
-    }
-
-    /// Enables or disables KVM dirty page tracking.
-    pub fn set_dirty_page_tracking(&mut self, enable: bool) -> Result<(), VmmError> {
-        // This function _always_ results in an ioctl update. The VMM is stateless in the sense
-        // that it's unaware of the current dirty page tracking setting.
-        // The VMM's consumer will need to cache the dirty tracking setting internally. For
-        // example, if this function were to be exposed through the VMM controller, the VMM
-        // resources should cache the flag.
-        self.vm
-            .set_kvm_memory_regions(&self.guest_memory, enable)
-            .map_err(VmmError::Vm)
     }
 
     /// Updates the path of the host file backing the emulated block device with id `drive_id`.

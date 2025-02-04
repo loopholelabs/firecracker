@@ -10,12 +10,22 @@ and this project adheres to
 
 ### Added
 
+- [#4987](https://github.com/firecracker-microvm/firecracker/pull/4987): Reset
+  physical counter register (`CNTPCT_EL0`) on VM startup. This avoids VM reading
+  the host physical counter value. This is only possible on 6.4 and newer
+  kernels. For older kernels physical counter will still be passed to the guest
+  unmodified. See more info
+  [here](https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md#arm-only-vm-physical-counter-behaviour)
+
 ### Changed
 
 - [#4913](https://github.com/firecracker-microvm/firecracker/pull/4913): Removed
   unnecessary fields (`max_connections` and `max_pending_resets`) from the
   snapshot format, bumping the snapshot version to 5.0.0. Users need to
   regenerate snapshots.
+- [#4926](https://github.com/firecracker-microvm/firecracker/pull/4926): Replace
+  underlying implementation for seccompiler from in house one in favor of
+  `libseccomp` which produces smaller and more optimized BPF code.
 
 ### Deprecated
 
@@ -25,6 +35,20 @@ and this project adheres to
 
 - [#4921](https://github.com/firecracker-microvm/firecracker/pull/4921): Fixed
   swagger `CpuConfig` definition to include missing aarch64-specific fields.
+- [#4916](https://github.com/firecracker-microvm/firecracker/pull/4916): Fixed
+  `IovDeque` implementation to work with any host page size. This fixes
+  virtio-net device on non 4K host kernels.
+- [#4991](https://github.com/firecracker-microvm/firecracker/pull/4991): Fixed
+  `mem_size_mib` and `track_dirty_pages` being mandatory for all
+  `PATCH /machine-config` requests. Now, they can be omitted which leaves these
+  parts of the machine configuration unchanged.
+- [#5007](https://github.com/firecracker-microvm/firecracker/pull/5007): Fixed
+  watchdog softlockup warning on x86_64 guests when a vCPU is paused during GDB
+  debugging.
+- [#5021](https://github.com/firecracker-microvm/firecracker/pull/5021) If a
+  balloon device is inflated post UFFD-backed snapshot restore, Firecracker now
+  causes `remove` UFFD messages to be sent to the UFFD handler. Previously, no
+  such message would be sent.
 
 ## [1.10.1]
 
@@ -98,7 +122,8 @@ and this project adheres to
   VMGenID support for microVMs running on ARM hosts with 6.1 guest kernels.
   Support for VMGenID via DeviceTree bindings exists only on mainline 6.10 Linux
   onwards. Users of Firecracker will need to backport the relevant patches on
-  top of their 6.1 kernels to make use of the feature.
+  top of their 6.1 kernels to make use of the feature. As a result, Firecracker
+  snapshot version is now 3.0.0
 - [#4732](https://github.com/firecracker-microvm/firecracker/pull/4732),
   [#4733](https://github.com/firecracker-microvm/firecracker/pull/4733),
   [#4741](https://github.com/firecracker-microvm/firecracker/pull/4741),
