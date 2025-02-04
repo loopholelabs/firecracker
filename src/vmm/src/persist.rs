@@ -470,17 +470,24 @@ pub fn restore_from_snapshot(
     let mem_state = &microvm_state.memory_state;
 
     let (guest_memory, uffd) = match params.mem_backend.backend_type {
-        MemBackendType::File => (
-            guest_memory_from_file(
-                mem_backend_path,
-                mem_state,
-                track_dirty_pages,
-                vm_resources.machine_config.huge_pages,
-                params.shared,
+        MemBackendType::File => {
+            if vm_resources.machine_config.huge_pages.is_hugetlbfs() {
+                return Err(RestoreFromSnapshotGuestMemoryError::File(
+                    GuestMemoryFromFileError::HugetlbfsSnapshot,
+                )
+                .into());
+            }
+            (
+                guest_memory_from_file(
+                    mem_backend_path,
+                    mem_state,
+                    track_dirty_pages,
+                    params.shared,
+                )
+                .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
+                None,
             )
-            .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
-            None,
-        ),
+        }
         MemBackendType::Uffd => guest_memory_from_uffd(
             mem_backend_path,
             mem_state,
@@ -537,13 +544,14 @@ pub enum GuestMemoryFromFileError {
     File(#[from] std::io::Error),
     /// Failed to restore guest memory: {0}
     Restore(#[from] MemoryError),
+    /// Cannot restore hugetlbfs backed snapshot by mapping the memory file. Please use uffd.
+    HugetlbfsSnapshot,
 }
 
 fn guest_memory_from_file(
     mem_file_path: &Path,
     mem_state: &GuestMemoryState,
     track_dirty_pages: bool,
-    huge_pages: HugePageConfig,
     shared: bool,
 ) -> Result<GuestMemoryMmap, GuestMemoryFromFileError> {
     let mem_file = if shared {
@@ -555,13 +563,7 @@ fn guest_memory_from_file(
         File::open(mem_file_path)?
     };
 
-    let guest_mem = GuestMemoryMmap::from_state(
-        Some(&mem_file),
-        mem_state,
-        track_dirty_pages,
-        huge_pages,
-        shared,
-    )?;
+    let guest_mem = GuestMemoryMmap::snapshot_file(mem_file, mem_state, track_dirty_pages, shared)?;
     Ok(guest_mem)
 }
 
@@ -621,15 +623,17 @@ fn create_guest_memory(
     huge_pages: HugePageConfig,
 ) -> Result<(GuestMemoryMmap, Vec<GuestRegionUffdMapping>), GuestMemoryFromUffdError> {
     let guest_memory =
-        GuestMemoryMmap::from_state(None, mem_state, track_dirty_pages, huge_pages, false)?;
+        GuestMemoryMmap::anonymous(mem_state.regions(), track_dirty_pages, huge_pages)?;
     let mut backend_mappings = Vec::with_capacity(guest_memory.num_regions());
-    for (mem_region, state_region) in guest_memory.iter().zip(mem_state.regions.iter()) {
+    let mut offset = 0;
+    for mem_region in guest_memory.iter() {
         backend_mappings.push(GuestRegionUffdMapping {
             base_host_virt_addr: mem_region.as_ptr() as u64,
             size: mem_region.size(),
-            offset: state_region.offset,
+            offset,
             page_size_kib: huge_pages.page_size_kib(),
         });
+        offset += mem_region.size() as u64;
     }
 
     Ok((guest_memory, backend_mappings))
@@ -809,7 +813,6 @@ mod tests {
             regions: vec![GuestMemoryRegionState {
                 base_address: 0,
                 size: 0x20000,
-                offset: 0x10000,
             }],
         };
 
@@ -818,7 +821,7 @@ mod tests {
 
         assert_eq!(uffd_regions.len(), 1);
         assert_eq!(uffd_regions[0].size, 0x20000);
-        assert_eq!(uffd_regions[0].offset, 0x10000);
+        assert_eq!(uffd_regions[0].offset, 0);
         assert_eq!(
             uffd_regions[0].page_size_kib,
             HugePageConfig::None.page_size_kib()
