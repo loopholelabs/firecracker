@@ -17,14 +17,14 @@ jobs:
           # Binaries
           - id: rust.x86_64
             src: .
-            os: public.ecr.aws/firecracker/fcuvm:v75
+            os: public.ecr.aws/firecracker/fcuvm:v77
             flags: ""
             cmd: ./Hydrunfile rust x86_64
             dst: out/*
             runner: depot-ubuntu-22.04-32
           - id: rust.aarch64
             src: .
-            os: public.ecr.aws/firecracker/fcuvm:v75
+            os: public.ecr.aws/firecracker/fcuvm:v77
             flags: ""
             cmd: ./Hydrunfile rust aarch64
             dst: out/*
