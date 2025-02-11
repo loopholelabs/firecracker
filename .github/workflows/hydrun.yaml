@@ -67,6 +67,7 @@ jobs:
   publish-linux:
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: write
     needs: build-linux
 
