@@ -67,6 +67,7 @@ jobs:
   publish-linux:
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: write
     needs: build-linux
 
@@ -77,14 +78,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: /tmp/out
-      - name: Extract branch name
-        id: extract_branch
-        run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
       - name: Publish pre-release to GitHub releases
         if: ${{ github.ref == 'refs/heads/main-live-migration-pvm' || github.ref == 'refs/heads/main-live-migration' || github.ref == 'refs/heads/firecracker-v1.8-live-migration-pvm' || github.ref == 'refs/heads/firecracker-v1.8-live-migration' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: release-${{ steps.extract_branch.outputs.branch }}
+          tag_name: release-${{ github.ref_name }}
           prerelease: true
           files: |
             /tmp/out/*/*
@@ -95,3 +93,26 @@ jobs:
           prerelease: false
           files: |
             /tmp/out/*/*
+
+      - name: "Configure AWS credentials"
+        uses: "aws-actions/configure-aws-credentials@v4"
+        with:
+          aws-region: "${{ vars.AWS_REGION }}"
+          role-to-assume: "${{ vars.AWS_IAM_ROLE }}"
+          role-session-name: "firecracker-hydrun-${{ github.job }}-${{ github.run_id }}"
+          role-duration-seconds: 10800 # 3h
+
+      - name: Upload to S3
+        if: "!startsWith(github.ref, 'refs/pull/')"
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            UPLOAD_FOLDER="release/${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
+            UPLOAD_FOLDER="dev/${GITHUB_REF#refs/heads/}"
+          else
+            echo "Skipping S3 upload: unsupported ref type $GITHUB_REF"
+            exit 0
+          fi
+          echo "Uploading artifacts to: ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/"
+          aws s3 cp /tmp/out ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/ --recursive
+
