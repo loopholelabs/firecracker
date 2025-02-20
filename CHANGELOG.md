@@ -49,6 +49,14 @@ and this project adheres to
   balloon device is inflated post UFFD-backed snapshot restore, Firecracker now
   causes `remove` UFFD messages to be sent to the UFFD handler. Previously, no
   such message would be sent.
+- [#5034](https://github.com/firecracker-microvm/firecracker/pull/5034): Fix an
+  integer underflow in the jailer when computing the value it passes to
+  Firecracker's `--parent-cpu-time-us` values, which caused development builds
+  of Firecracker to crash (but production builds were unaffected as underflows
+  do not panic in release mode).
+- [#5045](https://github.com/firecracker-microvm/firecracker/pull/5045): Fixed
+  an issue where firecracker intermittently receives SIGHUP when using jailer
+  with `--new-pid-ns` but without `--daemonize`.
 
 ## [1.10.1]
 
