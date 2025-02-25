@@ -65,6 +65,9 @@ where
         track_dirty_pages: bool,
     ) -> Result<Self, MemoryError>;
 
+    /// Flushes memory contents to disk.
+    fn msync(&self) -> std::result::Result<(), MemoryError>;
+
     /// Creates a GuestMemoryMmap with `size` in MiB backed by a memfd.
     fn memfd_backed(
         mem_size_mib: usize,
@@ -102,13 +105,15 @@ where
         file: File,
         state: &GuestMemoryState,
         track_dirty_pages: bool,
+        shared: bool,
     ) -> Result<Self, MemoryError> {
-        Self::create(
-            state.regions(),
-            libc::MAP_PRIVATE,
-            Some(file),
-            track_dirty_pages,
-        )
+        let flags = if shared {
+            libc::MAP_NORESERVE | libc::MAP_SHARED
+        } else {
+            libc::MAP_NORESERVE | libc::MAP_PRIVATE
+        };
+
+        Self::create(state.regions(), flags, Some(file), track_dirty_pages)
     }
 
     /// Describes GuestMemoryMmap through a GuestMemoryState struct.
@@ -203,6 +208,21 @@ impl GuestMemoryExtension for GuestMemoryMmap {
             .collect::<Result<Vec<_>, _>>()?;
 
         GuestMemoryMmap::from_regions(regions).map_err(MemoryError::VmMemoryError)
+    }
+
+    /// Flushes memory contents to disk.
+    fn msync(&self) -> std::result::Result<(), MemoryError> {
+        self.iter().for_each(|region| {
+            // SAFETY: It is safe to call `msync()` on both an anonymous (where it is a nop) and shared (where it flushes to disk) region
+            unsafe {
+                libc::msync(
+                    region.as_ptr().cast::<libc::c_void>(),
+                    region.size(),
+                    libc::MS_SYNC,
+                );
+            }
+        });
+        Ok(())
     }
 
     /// Describes GuestMemoryMmap through a GuestMemoryState struct.
@@ -570,7 +590,7 @@ mod tests {
         guest_memory.dump(&mut memory_file).unwrap();
 
         let restored_guest_memory =
-            GuestMemoryMmap::snapshot_file(memory_file, &memory_state, false).unwrap();
+            GuestMemoryMmap::snapshot_file(memory_file, &memory_state, false, false).unwrap();
 
         // Check that the region contents are the same.
         let mut restored_region = vec![0u8; page_size * 2];
@@ -629,7 +649,7 @@ mod tests {
 
         // We can restore from this because this is the first dirty dump.
         let restored_guest_memory =
-            GuestMemoryMmap::snapshot_file(file, &memory_state, false).unwrap();
+            GuestMemoryMmap::snapshot_file(file, &memory_state, false, false).unwrap();
 
         // Check that the region contents are the same.
         let mut restored_region = vec![0u8; region_size];
