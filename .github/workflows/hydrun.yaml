@@ -100,7 +100,7 @@ jobs:
           aws-region: "${{ vars.AWS_REGION }}"
           role-to-assume: "${{ vars.AWS_IAM_ROLE }}"
           role-session-name: "firecracker-hydrun-${{ github.job }}-${{ github.run_id }}"
-          role-duration-seconds: 10800 # 3h
+          role-duration-seconds: 900
 
       - name: Upload to S3
         if: "!startsWith(github.ref, 'refs/pull/')"
@@ -115,4 +115,3 @@ jobs:
           fi
           echo "Uploading artifacts to: ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/"
           aws s3 cp /tmp/out ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/ --recursive
-
