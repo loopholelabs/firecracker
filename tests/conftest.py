@@ -33,6 +33,7 @@ import pytest
 import host_tools.cargo_build as build_tools
 from framework import defs, utils
 from framework.artifacts import disks, kernel_params
+from framework.defs import DEFAULT_BINARY_DIR
 from framework.microvm import MicroVMFactory
 from framework.properties import global_props
 from framework.utils_cpu_templates import (
@@ -252,16 +253,6 @@ def bin_seccomp_paths():
     yield demos
 
 
-@pytest.fixture
-def uffd_handler_paths():
-    """Build UFFD handler binaries."""
-    handlers = {
-        f"{handler}_handler": build_tools.get_example(f"uffd_{handler}_handler")
-        for handler in ["malicious", "valid", "fault_all"]
-    }
-    yield handlers
-
-
 @pytest.fixture(scope="session")
 def netns_factory(worker_id):
     """A network namespace factory
@@ -303,14 +294,11 @@ def netns_factory(worker_id):
 def microvm_factory(request, record_property, results_dir, netns_factory):
     """Fixture to create microvms simply."""
 
-    if binary_dir := request.config.getoption("--binary-dir"):
-        fc_binary_path = Path(binary_dir) / "firecracker"
-        jailer_binary_path = Path(binary_dir) / "jailer"
-        if not fc_binary_path.exists():
-            raise RuntimeError("Firecracker binary does not exist")
-    else:
-        fc_binary_path, jailer_binary_path = build_tools.get_firecracker_binaries()
-    record_property("firecracker_bin", str(fc_binary_path))
+    binary_dir = request.config.getoption("--binary-dir") or DEFAULT_BINARY_DIR
+    if isinstance(binary_dir, str):
+        binary_dir = Path(binary_dir)
+
+    record_property("firecracker_bin", str(binary_dir / "firecracker"))
 
     # If `--custom-cpu-template` option is provided, the given CPU template will
     # be applied afterwards unless overwritten.
@@ -326,8 +314,7 @@ def microvm_factory(request, record_property, results_dir, netns_factory):
     # We could override the chroot base like so
     # jailer_kwargs={"chroot_base": "/srv/jailo"}
     uvm_factory = MicroVMFactory(
-        fc_binary_path,
-        jailer_binary_path,
+        binary_dir,
         netns_factory=netns_factory,
         custom_cpu_template=custom_cpu_template,
     )
@@ -386,8 +373,6 @@ def cpu_template_any(request, record_property):
 @pytest.fixture(params=["Sync", "Async"])
 def io_engine(request):
     """All supported io_engines"""
-    if request.param == "Async" and not utils.is_io_uring_supported():
-        pytest.skip("io_uring not supported in this kernel")
     return request.param
 
 
