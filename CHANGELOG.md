@@ -10,12 +10,32 @@ and this project adheres to
 
 ### Added
 
+- [#5065](https://github.com/firecracker-microvm/firecracker/pull/5065) Added
+  support for Intel AMX (Advanced Matrix Extensions).
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+## [1.11.0]
+
+### Added
+
 - [#4987](https://github.com/firecracker-microvm/firecracker/pull/4987): Reset
   physical counter register (`CNTPCT_EL0`) on VM startup. This avoids VM reading
   the host physical counter value. This is only possible on 6.4 and newer
   kernels. For older kernels physical counter will still be passed to the guest
   unmodified. See more info
   [here](https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md#arm-only-vm-physical-counter-behaviour)
+- [#5048](https://github.com/firecracker-microvm/firecracker/pull/5048): Added
+  support for [PVH boot mode](docs/pvh.md). This is used when an x86 kernel
+  provides the appropriate ELF Note to indicate that PVH boot mode is supported.
+  Linux kernels newer than 5.0 compiled with `CONFIG_PVH=y` set this ELF Note,
+  as do FreeBSD kernels.
 
 ### Changed
 
@@ -64,6 +84,9 @@ and this project adheres to
 - [#5046](https://github.com/firecracker-microvm/firecracker/pull/5046): Retry
   KVM_CREATE_VM on EINTR that occasionally happen on heavily loaded hosts to
   improve reliability of microVM creation.
+- [#5052](https://github.com/firecracker-microvm/firecracker/pull/5052): Build
+  the empty seccomp policy as default for debug builds to avoid crashes on
+  syscalls introduced by debug assertions from Rust 1.80.0.
 
 ## [1.10.1]
 
