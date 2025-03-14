@@ -514,11 +514,13 @@ def test_vmgenid(guest_kernel_linux_6_1, rootfs, microvm_factory, snapshot_type)
         check_vmgenid_update_count(vm, i + 1)
 
 
-# TODO add `global_props.host_os == "amzn2"` condition
-# once amazon linux kernels have patches.
 @pytest.mark.skipif(
-    platform.machine() != "aarch64" or global_props.host_linux_version_tpl < (6, 4),
-    reason="This is aarch64 specific test and should only be run on 6.4 and later kernels",
+    platform.machine() != "aarch64"
+    or (
+        global_props.host_linux_version_tpl < (6, 4)
+        and global_props.host_os not in ("amzn2", "amzn2023")
+    ),
+    reason="This test requires aarch64 and either kernel 6.4+ or Amazon Linux",
 )
 def test_physical_counter_reset_aarch64(uvm_nano):
     """
@@ -540,10 +542,10 @@ def test_physical_counter_reset_aarch64(uvm_nano):
     snap_editor = host.get_binary("snapshot-editor")
 
     cntpct_el0 = hex(0x603000000013DF01)
-    # If a CPU runs at 3GHz, it will have a counter value of 1_000_000_000
-    # in 1/3 of a second. The host surely will run for more than 1/3 second before
+    # If a CPU runs at 3GHz, it will have a counter value of 8_000_000_000
+    # in 2.66 seconds. The host surely will run for more than 2.66 seconds before
     # executing this test.
-    max_value = 800_000_000
+    max_value = 8_000_000_000
 
     cmd = [
         str(snap_editor),
