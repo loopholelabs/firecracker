@@ -105,6 +105,10 @@ impl Persist<'_> for Queue {
         };
         if constructor_args.is_activated {
             queue.initialize(&constructor_args.mem)?;
+
+            // The queue is not activated yet, so we need to set the
+            // to the correct values.
+            queue.used_ring_idx_set(queue.next_used.0);
         }
         Ok(queue)
     }
