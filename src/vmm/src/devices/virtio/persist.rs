@@ -156,6 +156,10 @@ impl Persist<'_> for Queue {
                 // Resetting ensures we don't make incorrect kick decisions immediately after restore.
                 queue.num_added = Wrapping(0);
             }
+
+            // Add another fence to ensure these potential index updates are visible
+            // before any subsequent queue operations or the guest VCPU resumes.
+            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         }
         Ok(queue)
     }
