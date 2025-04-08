@@ -182,7 +182,7 @@ where
         let evset = event.event_set();
 
         if self.is_activated() {
-            let pause = self.pause().expect("failed to acquire vsock pause mutex");
+            let pause = self.pause.lock().expect("failed to acquire vsock pause mutex");
             let mut raise_irq = false;
             match source {
                 Self::PROCESS_ACTIVATE => self.handle_activate_event(ops),

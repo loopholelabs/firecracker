@@ -366,7 +366,7 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                         .downcast_mut::<Vsock<VsockUnixBackend>>()
                         .unwrap();
 
-                    let pause = vsock.pause().expect("failed to acquire vsock pause mutex");
+                    let pause = vsock.pause.lock().expect("failed to acquire vsock pause mutex");
 
                     // Send Transport event to reset connections if device
                     // is activated.

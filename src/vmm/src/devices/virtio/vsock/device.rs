@@ -55,7 +55,6 @@ pub(crate) const AVAIL_FEATURES: u64 =
 #[derive(Debug)]
 pub struct Vsock<B> {
     cid: u64,
-    pause: Arc<Mutex<()>>,
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
     pub(crate) backend: B,
@@ -72,6 +71,8 @@ pub struct Vsock<B> {
 
     pub rx_packet: VsockPacketRx,
     pub tx_packet: VsockPacketTx,
+
+    pub pause: Arc<Mutex<()>>,
 }
 
 // TODO: Detect / handle queue deadlock:
@@ -95,11 +96,8 @@ where
             queue_events.push(EventFd::new(libc::EFD_NONBLOCK).map_err(VsockError::EventFd)?);
         }
 
-        let pause =  Arc::new(Mutex::new(()));
-
         Ok(Vsock {
             cid,
-            pause,
             queues,
             queue_events,
             backend,
@@ -110,6 +108,7 @@ where
             device_state: DeviceState::Inactive,
             rx_packet: VsockPacketRx::new()?,
             tx_packet: VsockPacketTx::default(),
+            pause: Arc::new(Mutex::new(())),
         })
     }
 
@@ -135,10 +134,6 @@ where
     /// Access the backend behind the device.
     pub fn backend(&self) -> &B {
         &self.backend
-    }
-
-    pub fn pause(&mut self) -> LockResult<MutexGuard<'_, ()>> {
-        self.pause.lock()
     }
 
     /// Signal the guest driver that we've used some virtio buffers that it had previously made
