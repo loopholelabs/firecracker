@@ -7,7 +7,6 @@ use std::num::Wrapping;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use log::warn;
 use serde::{Deserialize, Serialize};
 
 use super::queue::QueueError;
@@ -107,59 +106,9 @@ impl Persist<'_> for Queue {
         if constructor_args.is_activated {
             queue.initialize(&constructor_args.mem)?;
 
-            // Read the actual indices from the restored guest memory using volatile reads
-            // Note: read_volatile ensures we get the value from memory, not a cached one.
-            let current_avail_idx_mem = queue.avail_ring_idx_get(); // Uses read_volatile internally
-
-            // Manually read the used ring index using volatile read
-            let current_used_idx_mem = unsafe {
-                // Assuming used_ring_ptr points to the start of the UsedRing struct (flags: u16, idx: u16, ...)
-                let idx_ptr = queue
-                    .used_ring_ptr
-                    .add(std::mem::size_of::<u16>()) // Offset past 'flags' field
-                    .cast::<u16>();
-                // SAFETY: initialize() checks validity and alignment.
-                // This reads the value directly from the restored guest memory.
-                idx_ptr.read_volatile()
-            };
-
-            // Use a strong memory fence to ensure that previous writes (like setting up
-            // queue pointers during initialize) are visible before these reads, and that
-            // subsequent operations see the results of these reads and potential updates below.
-            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-
-            // Compare Firecracker's restored indices with the indices read from memory.
-            // If they differ, update Firecracker's internal state to match the memory.
-            if queue.next_avail.0 != current_avail_idx_mem {
-                warn!(
-                    "restored queue next_avail ({}) differs from memory avail_ring.idx ({}), \
-                     synchronizing internal index to memory state.",
-                    queue.next_avail.0, current_avail_idx_mem
-                );
-                // Trust the index read from guest memory.
-                queue.next_avail = Wrapping(current_avail_idx_mem);
-            }
-
-            if queue.next_used.0 != current_used_idx_mem {
-                warn!(
-                    "restored queue next_used ({}) differs from memory used_ring.idx ({}), \
-                     synchronizing internal index to memory state.",
-                    queue.next_used.0, current_used_idx_mem
-                );
-                // Trust the index read from guest memory.
-                queue.next_used = Wrapping(current_used_idx_mem);
-
-                // IMPORTANT: If we adjust next_used based on memory, we must also reset
-                // num_added. Firecracker's count of buffers added since the last *potential*
-                // kick is now invalid because the baseline (next_used) has shifted based
-                // on the memory state, which might already reflect guest consumption.
-                // Resetting ensures we don't make incorrect kick decisions immediately after restore.
-                queue.num_added = Wrapping(0);
-            }
-
-            // Add another fence to ensure these potential index updates are visible
-            // before any subsequent queue operations or the guest VCPU resumes.
-            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+            // The queue is not activated yet, so we need to set the
+            // to the correct values.
+            queue.used_ring_idx_set(queue.next_used.0);
         }
         Ok(queue)
     }
