@@ -182,6 +182,7 @@ where
         let evset = event.event_set();
 
         if self.is_activated() {
+            let pause = self.pause().expect("failed to acquire vsock pause mutex");
             let mut raise_irq = false;
             match source {
                 Self::PROCESS_ACTIVATE => self.handle_activate_event(ops),
@@ -194,6 +195,7 @@ where
             if raise_irq {
                 self.signal_used_queue().unwrap_or_default();
             }
+            drop(pause);
         } else {
             warn!(
                 "Vsock: The device is not yet activated. Spurious event received: {:?}",

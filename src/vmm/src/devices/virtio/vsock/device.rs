@@ -21,7 +21,7 @@
 //! - a backend FD.
 
 use std::fmt::Debug;
-
+use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use log::{error, warn};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -55,6 +55,7 @@ pub(crate) const AVAIL_FEATURES: u64 =
 #[derive(Debug)]
 pub struct Vsock<B> {
     cid: u64,
+    pause: Arc<Mutex<()>>,
     pub(crate) queues: Vec<VirtQueue>,
     pub(crate) queue_events: Vec<EventFd>,
     pub(crate) backend: B,
@@ -94,8 +95,11 @@ where
             queue_events.push(EventFd::new(libc::EFD_NONBLOCK).map_err(VsockError::EventFd)?);
         }
 
+        let pause =  Arc::new(Mutex::new(()));
+
         Ok(Vsock {
             cid,
+            pause,
             queues,
             queue_events,
             backend,
@@ -131,6 +135,10 @@ where
     /// Access the backend behind the device.
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+
+    pub fn pause(&self) -> LockResult<MutexGuard<'_, ()>> {
+        self.pause.lock()
     }
 
     /// Signal the guest driver that we've used some virtio buffers that it had previously made
