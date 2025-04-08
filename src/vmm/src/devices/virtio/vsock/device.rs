@@ -137,7 +137,7 @@ where
         &self.backend
     }
 
-    pub fn pause(&self) -> LockResult<MutexGuard<'_, ()>> {
+    pub fn pause(&mut self) -> LockResult<MutexGuard<'_, ()>> {
         self.pause.lock()
     }
 
