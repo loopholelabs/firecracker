@@ -7,6 +7,11 @@ if [ "$1" = "rust" ]; then
     # Configure Git
     git config --global --add safe.directory '*'
 
+    # Set build metadata in version
+    current_version=$(cat src/firecracker/Cargo.toml | grep '^version =' | cut -d'"' -f 2)
+    git_sha=$(git rev-parse HEAD | head -c 12)
+    ./tools/bump-version.sh "$current_version+$3.$git_sha"
+
     # Build
     export RUSTFLAGS='-C target-feature=+crt-static'
     cargo build --package firecracker --package jailer --package seccompiler --package rebase-snap --package cpu-template-helper --target "$2-unknown-linux-musl" --all-features --release
