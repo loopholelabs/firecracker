@@ -21,7 +21,7 @@
 //! - a backend FD.
 
 use std::fmt::Debug;
-
+use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use log::{error, warn};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -71,6 +71,8 @@ pub struct Vsock<B> {
 
     pub rx_packet: VsockPacketRx,
     pub tx_packet: VsockPacketTx,
+
+    pub pause: Arc<Mutex<()>>,
 }
 
 // TODO: Detect / handle queue deadlock:
@@ -106,6 +108,7 @@ where
             device_state: DeviceState::Inactive,
             rx_packet: VsockPacketRx::new()?,
             tx_packet: VsockPacketTx::default(),
+            pause: Arc::new(Mutex::new(())),
         })
     }
 

@@ -366,6 +366,9 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                         .downcast_mut::<Vsock<VsockUnixBackend>>()
                         .unwrap();
 
+                    let pause = vsock.pause.clone();
+                    let guard = pause.lock().expect("failed to acquire vsock pause mutex");
+
                     // Send Transport event to reset connections if device
                     // is activated.
                     if vsock.is_activated() {
@@ -387,6 +390,8 @@ impl<'a> Persist<'a> for MMIODeviceManager {
                         transport_state,
                         device_info: device_info.clone(),
                     });
+
+                    drop(guard);
                 }
                 TYPE_RNG => {
                     let entropy = locked_device
