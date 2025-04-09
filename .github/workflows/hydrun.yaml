@@ -19,14 +19,14 @@ jobs:
             src: .
             os: public.ecr.aws/firecracker/fcuvm:v77
             flags: ""
-            cmd: ./Hydrunfile rust x86_64
+            cmd: ./Hydrunfile rust x86_64 loopholelabs.pvm
             dst: out/*
             runner: depot-ubuntu-22.04-32
           - id: rust.aarch64
             src: .
             os: public.ecr.aws/firecracker/fcuvm:v77
             flags: ""
-            cmd: ./Hydrunfile rust aarch64
+            cmd: ./Hydrunfile rust aarch64 loopholelabs.pvm
             dst: out/*
             runner: depot-ubuntu-22.04-arm-32
 
@@ -113,5 +113,9 @@ jobs:
             echo "Skipping S3 upload: unsupported ref type $GITHUB_REF"
             exit 0
           fi
+          echo "Uploading artifacts to: ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/"
+          aws s3 cp /tmp/out ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/ --recursive
+
+          UPLOAD_FOLDER="dev/sha/${GITHUB_SHA}"
           echo "Uploading artifacts to: ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/"
           aws s3 cp /tmp/out ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/ --recursive
