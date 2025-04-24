@@ -1,0 +1,119 @@
+name: hydrun CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 0 * * 0"
+
+jobs:
+  build-linux:
+    runs-on: ${{ matrix.target.runner }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        target:
+          # Binaries
+          - id: rust.x86_64
+            src: .
+            os: public.ecr.aws/firecracker/fcuvm:v77
+            flags: ""
+            cmd: ./Hydrunfile rust x86_64 loopholelabs.pvm
+            dst: out/*
+            runner: depot-ubuntu-22.04-32
+          - id: rust.aarch64
+            src: .
+            os: public.ecr.aws/firecracker/fcuvm:v77
+            flags: ""
+            cmd: ./Hydrunfile rust aarch64 loopholelabs.pvm
+            dst: out/*
+            runner: depot-ubuntu-22.04-arm-32
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /tmp/ccache
+          key: cache-ccache-${{ matrix.target.id }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Set up hydrun
+        run: |
+          curl -L -o /tmp/hydrun "https://github.com/pojntfx/hydrun/releases/latest/download/hydrun.linux-$(uname -m)"
+          sudo install /tmp/hydrun /usr/local/bin
+      - name: Build with hydrun
+        working-directory: ${{ matrix.target.src }}
+        run: hydrun -o ${{ matrix.target.os }} ${{ matrix.target.flags }} "${{ matrix.target.cmd }}"
+      - name: Fix permissions for output
+        run: sudo chown -R $USER .
+      - name: Save ccache
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /tmp/ccache
+          key: cache-ccache-${{ matrix.target.id }}
+      - name: Upload output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target.id }}
+          path: ${{ matrix.target.dst }}
+
+  publish-linux:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    needs: build-linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download output
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/out
+      - name: Publish pre-release to GitHub releases
+        if: ${{ github.ref == 'refs/heads/main-live-migration-pvm' || github.ref == 'refs/heads/main-live-migration' || github.ref == 'refs/heads/firecracker-v1.8-live-migration-pvm' || github.ref == 'refs/heads/firecracker-v1.8-live-migration' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: release-${{ github.ref_name }}
+          prerelease: true
+          files: |
+            /tmp/out/*/*
+      - name: Publish release to GitHub releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: false
+          files: |
+            /tmp/out/*/*
+      - name: "Configure AWS credentials"
+        uses: "aws-actions/configure-aws-credentials@v4"
+        with:
+          aws-region: "${{ vars.AWS_REGION }}"
+          role-to-assume: "${{ vars.AWS_IAM_ROLE }}"
+          role-session-name: "firecracker-hydrun-${{ github.job }}-${{ github.run_id }}"
+          role-duration-seconds: 900
+
+      - name: Upload to S3
+        if: "!startsWith(github.ref, 'refs/pull/')"
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            UPLOAD_FOLDER="release/${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
+            UPLOAD_FOLDER="dev/${GITHUB_REF#refs/heads/}"
+          else
+            echo "Skipping S3 upload: unsupported ref type $GITHUB_REF"
+            exit 0
+          fi
+          echo "Uploading artifacts to: ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/"
+          aws s3 cp /tmp/out ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/ --recursive
+          UPLOAD_FOLDER="dev/sha/${GITHUB_SHA}"
+          echo "Uploading artifacts to: ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/"
+          aws s3 cp /tmp/out ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/ --recursive

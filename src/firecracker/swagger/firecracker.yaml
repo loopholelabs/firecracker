@@ -1212,6 +1212,8 @@ definitions:
         enum:
           - Full
           - Diff
+          - Msync
+          - MsyncAndState
         description:
           Type of snapshot to create. It is optional and by default, a full
           snapshot is created.
@@ -1270,6 +1272,11 @@ definitions:
         description: Network host device names to override
         items:
           $ref: "#/definitions/NetworkOverride"
+      shared:
+        type: boolean
+        description: When set to true and the guest memory backend is a file,
+          changes to the memory are asynchronously written back to the
+          backend as the VM is running.
 
 
   TokenBucket:
