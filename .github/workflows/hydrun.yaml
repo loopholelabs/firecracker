@@ -93,7 +93,6 @@ jobs:
           prerelease: false
           files: |
             /tmp/out/*/*
-
       - name: "Configure AWS credentials"
         uses: "aws-actions/configure-aws-credentials@v4"
         with:
@@ -115,7 +114,6 @@ jobs:
           fi
           echo "Uploading artifacts to: ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/"
           aws s3 cp /tmp/out ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/ --recursive
-
           UPLOAD_FOLDER="dev/sha/${GITHUB_SHA}"
           echo "Uploading artifacts to: ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/"
           aws s3 cp /tmp/out ${{ vars.S3_BUCKET_URL }}firecracker/${UPLOAD_FOLDER}/ --recursive

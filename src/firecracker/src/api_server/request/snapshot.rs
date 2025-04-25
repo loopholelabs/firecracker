@@ -66,13 +66,13 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
         (Some(_), Some(_)) => {
             return Err(RequestError::SerdeJson(serde_json::Error::custom(
                 TOO_MANY_FIELDS,
-            )))
+            )));
         }
         // Ensure that one of `mem_file_path` or `mem_backend` fields is always specified.
         (None, None) => {
             return Err(RequestError::SerdeJson(serde_json::Error::custom(
                 MISSING_FIELD,
-            )))
+            )));
         }
         _ => {}
     }
@@ -105,6 +105,7 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
         mem_backend,
         enable_diff_snapshots: snapshot_config.enable_diff_snapshots,
         resume_vm: snapshot_config.resume_vm,
+        network_overrides: snapshot_config.network_overrides,
         shared: snapshot_config.shared,
     };
 
@@ -121,7 +122,7 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, RequestError> {
 
 #[cfg(test)]
 mod tests {
-    use vmm::vmm_config::snapshot::{MemBackendConfig, MemBackendType};
+    use vmm::vmm_config::snapshot::{MemBackendConfig, MemBackendType, NetworkOverride};
 
     use super::*;
     use crate::api_server::parsed_request::tests::{depr_action_from_req, vmm_action_from_request};
@@ -182,13 +183,15 @@ mod tests {
             },
             enable_diff_snapshots: false,
             resume_vm: false,
-            shared: false,
+            network_overrides: vec![],
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
-        assert!(parsed_request
-            .parsing_info()
-            .take_deprecation_message()
-            .is_none());
+        assert!(
+            parsed_request
+                .parsing_info()
+                .take_deprecation_message()
+                .is_none()
+        );
         assert_eq!(
             vmm_action_from_request(parsed_request),
             VmmAction::LoadSnapshot(expected_config)
@@ -210,13 +213,15 @@ mod tests {
             },
             enable_diff_snapshots: true,
             resume_vm: false,
-            shared: false,
+            network_overrides: vec![],
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
-        assert!(parsed_request
-            .parsing_info()
-            .take_deprecation_message()
-            .is_none());
+        assert!(
+            parsed_request
+                .parsing_info()
+                .take_deprecation_message()
+                .is_none()
+        );
         assert_eq!(
             vmm_action_from_request(parsed_request),
             VmmAction::LoadSnapshot(expected_config)
@@ -238,13 +243,54 @@ mod tests {
             },
             enable_diff_snapshots: false,
             resume_vm: true,
-            shared: false,
+            network_overrides: vec![],
         };
         let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
-        assert!(parsed_request
-            .parsing_info()
-            .take_deprecation_message()
-            .is_none());
+        assert!(
+            parsed_request
+                .parsing_info()
+                .take_deprecation_message()
+                .is_none()
+        );
+        assert_eq!(
+            vmm_action_from_request(parsed_request),
+            VmmAction::LoadSnapshot(expected_config)
+        );
+
+        let body = r#"{
+            "snapshot_path": "foo",
+            "mem_backend": {
+                "backend_path": "bar",
+                "backend_type": "Uffd"
+            },
+            "resume_vm": true,
+            "network_overrides": [
+                {
+                    "iface_id": "eth0",
+                    "host_dev_name": "vmtap2"
+                }
+            ]
+        }"#;
+        let expected_config = LoadSnapshotParams {
+            snapshot_path: PathBuf::from("foo"),
+            mem_backend: MemBackendConfig {
+                backend_path: PathBuf::from("bar"),
+                backend_type: MemBackendType::Uffd,
+            },
+            enable_diff_snapshots: false,
+            resume_vm: true,
+            network_overrides: vec![NetworkOverride {
+                iface_id: String::from("eth0"),
+                host_dev_name: String::from("vmtap2"),
+            }],
+        };
+        let mut parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
+        assert!(
+            parsed_request
+                .parsing_info()
+                .take_deprecation_message()
+                .is_none()
+        );
         assert_eq!(
             vmm_action_from_request(parsed_request),
             VmmAction::LoadSnapshot(expected_config)
@@ -263,7 +309,7 @@ mod tests {
             },
             enable_diff_snapshots: false,
             resume_vm: true,
-            shared: false,
+            network_overrides: vec![],
         };
         let parsed_request = parse_put_snapshot(&Body::new(body), Some("load")).unwrap();
         assert_eq!(
@@ -353,16 +399,20 @@ mod tests {
         let body = r#"{
             "state": "Paused"
         }"#;
-        assert!(parse_patch_vm_state(&Body::new(body))
-            .unwrap()
-            .eq(&ParsedRequest::new_sync(VmmAction::Pause)));
+        assert!(
+            parse_patch_vm_state(&Body::new(body))
+                .unwrap()
+                .eq(&ParsedRequest::new_sync(VmmAction::Pause))
+        );
 
         let body = r#"{
             "state": "Resumed"
         }"#;
-        assert!(parse_patch_vm_state(&Body::new(body))
-            .unwrap()
-            .eq(&ParsedRequest::new_sync(VmmAction::Resume)));
+        assert!(
+            parse_patch_vm_state(&Body::new(body))
+                .unwrap()
+                .eq(&ParsedRequest::new_sync(VmmAction::Resume))
+        );
 
         let invalid_body = r#"{
             "invalid": "Paused"

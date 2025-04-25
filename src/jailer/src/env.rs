@@ -2,24 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::ffi::{CStr, CString, OsString};
-use std::fs::{self, canonicalize, read_to_string, File, OpenOptions, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions, canonicalize, read_to_string};
 use std::io;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{exit, id, Command, Stdio};
+use std::process::{Command, Stdio, exit, id};
 
 use utils::arg_parser::UtilsArgParserError::MissingValue;
-use utils::time::{get_time_us, ClockType};
+use utils::time::{ClockType, get_time_us};
 use utils::{arg_parser, validators};
 use vmm_sys_util::syscall::SyscallReturnCode;
 
+use crate::JailerError;
 use crate::cgroup::{CgroupConfiguration, CgroupConfigurationBuilder};
 use crate::chroot::chroot;
-use crate::resource_limits::{ResourceLimits, FSIZE_ARG, NO_FILE_ARG};
-use crate::JailerError;
+use crate::resource_limits::{FSIZE_ARG, NO_FILE_ARG, ResourceLimits};
 
 pub const PROC_MOUNTS: &str = "/proc/mounts";
 
@@ -854,14 +854,6 @@ mod tests {
         arg_vec
     }
 
-    fn get_major(dev: u64) -> u32 {
-        unsafe { libc::major(dev) }
-    }
-
-    fn get_minor(dev: u64) -> u32 {
-        unsafe { libc::minor(dev) }
-    }
-
     fn create_env(mock_proc_mounts: &str) -> Env {
         // Create a standard environment.
         let arg_parser = build_arg_parser();
@@ -1120,8 +1112,8 @@ mod tests {
         // Ensure device's properties.
         let metadata = fs::metadata(dev_path.to_str().unwrap()).unwrap();
         assert!(metadata.file_type().is_char_device());
-        assert_eq!(get_major(metadata.st_rdev()), major);
-        assert_eq!(get_minor(metadata.st_rdev()), minor);
+        assert_eq!(libc::major(metadata.st_rdev()), major);
+        assert_eq!(libc::minor(metadata.st_rdev()), minor);
         assert_eq!(
             metadata.permissions().mode(),
             libc::S_IFCHR | libc::S_IRUSR | libc::S_IWUSR

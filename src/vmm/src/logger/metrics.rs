@@ -68,7 +68,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Serialize, Serializer};
-use utils::time::{get_time_ns, get_time_us, ClockType};
+use utils::time::{ClockType, get_time_ns, get_time_us};
 
 use super::FcLineWriter;
 use crate::devices::legacy;
@@ -604,10 +604,6 @@ pub struct PerformanceMetrics {
     pub full_create_snapshot: SharedStoreMetric,
     /// Measures the snapshot diff create time, at the API (user) level, in microseconds.
     pub diff_create_snapshot: SharedStoreMetric,
-     /// Measures the snapshot memory synchronization time, at the VMM level, in microseconds.
-    pub msync_create_snapshot: SharedStoreMetric,
-    /// Measures the snapshot memory synchronization and state time, at the VMM level, in microseconds.
-    pub msync_and_state_create_snapshot: SharedStoreMetric,
     /// Measures the snapshot load time, at the API (user) level, in microseconds.
     pub load_snapshot: SharedStoreMetric,
     /// Measures the microVM pausing duration, at the API (user) level, in microseconds.
@@ -624,6 +620,10 @@ pub struct PerformanceMetrics {
     pub vmm_pause_vm: SharedStoreMetric,
     /// Measures the microVM resuming duration, at the VMM level, in microseconds.
     pub vmm_resume_vm: SharedStoreMetric,
+    /// Measures the snapshot memory synchronization time, at the VMM level, in microseconds.
+    pub msync_create_snapshot: SharedStoreMetric,
+    /// Measures the snapshot memory synchronization and state time, at the VMM level, in microseconds.
+    pub msync_and_state_create_snapshot: SharedStoreMetric,
 }
 impl PerformanceMetrics {
     /// Const default construction.
@@ -957,8 +957,8 @@ impl FirecrackerMetrics {
 #[cfg(test)]
 mod tests {
     use std::io::{ErrorKind, LineWriter};
-    use std::sync::atomic::fence;
     use std::sync::Arc;
+    use std::sync::atomic::fence;
     use std::thread;
 
     use vmm_sys_util::tempfile::TempFile;

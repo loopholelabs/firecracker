@@ -39,12 +39,13 @@ workload at that particular point in time.
 
 ### Supported platforms
 
-> [!WARNING]
->
-> The Firecracker snapshot feature is in
-> [developer preview](../RELEASE_POLICY.md) on all CPU micro-architectures
-> listed in [README](../../README.md#supported-platforms). See
-> [this section](#developer-preview-status) for more info.
+The Firecracker snapshot feature is supported on all CPU micro-architectures
+listed in [README](../../README.md#supported-platforms).
+
+[!WARNING]
+
+Diff snapshot support is in developer preview. See
+[this section](#developer-preview-status) for more info.
 
 ### Overview
 
@@ -116,27 +117,11 @@ all [supported platforms](../../README.md#tested-platforms).
 
 ### Developer preview status
 
-The snapshot functionality is still in developer preview due to the following:
-
-- Poor entropy and replayable randomness when resuming multiple microvms from
-  the same snapshot. We do not recommend to use snapshotting in production if
-  there is no mechanism to guarantee proper secrecy and uniqueness between
-  guests. Please see
-  [Snapshot security and uniqueness](#snapshot-security-and-uniqueness).
+Diff snapshots are still in developer preview while we are diving deep into how
+the feature can be combined with guest_memfd support in Firecracker.
 
 ### Limitations
 
-- Currently on aarch64 platforms only lower 128 bits of any register are saved
-  due to the limitations of `get/set_one_reg` from `kvm-ioctls` crate that
-  Firecracker uses to interact with KVM. This creates an issue with newer
-  aarch64 CPUs with support for registers with width greater than 128 bits,
-  because these registers will be truncated before being stored in the snapshot.
-  This can lead to uVM failure if restored from such snapshot. Because registers
-  wider than 128 bits are usually used in SVE instructions, the best way to
-  mitigate this issue is to ensure that the software run in uVM does not use SVE
-  instructions during snapshot creation. An alternative way is to use
-  [CPU templates](../cpu_templates/cpu-templates.md) to disable SVE related
-  features in uVM.
 - High snapshot latency on 5.4+ host kernels due to cgroups V1. We strongly
   recommend to deploy snapshots on cgroups V2 enabled hosts for the implied
   kernel versions -
@@ -539,7 +524,7 @@ For more information please see [this doc](random-for-clones.md)
 
 ### Usage examples
 
-#### Example 1: secure usage (currently in dev preview)
+#### Example 1: secure usage
 
 ```console
 Boot microVM A -> ... -> Create snapshot S -> Terminate

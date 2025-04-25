@@ -3,13 +3,13 @@
 
 /// Model Specific Registers (MSRs) related functionality.
 use bitflags::bitflags;
-use kvm_bindings::{kvm_msr_entry, MsrList, Msrs};
+use kvm_bindings::{MsrList, Msrs, kvm_msr_entry};
 use kvm_ioctls::{Kvm, VcpuFd};
 
-use crate::arch::x86_64::gen::hyperv::*;
-use crate::arch::x86_64::gen::hyperv_tlfs::*;
-use crate::arch::x86_64::gen::msr_index::*;
-use crate::arch::x86_64::gen::perf_event::*;
+use crate::arch::x86_64::generated::hyperv::*;
+use crate::arch::x86_64::generated::hyperv_tlfs::*;
+use crate::arch::x86_64::generated::msr_index::*;
+use crate::arch::x86_64::generated::perf_event::*;
 use crate::cpu_config::x86_64::cpuid::common::GetCpuidError;
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
@@ -49,7 +49,7 @@ const APIC_BASE_MSR: u32 = 0x800;
 /// Number of APIC MSR indexes
 const APIC_MSR_INDEXES: u32 = 0x400;
 
-/// /// Custom KVM MSRs fall in the range 0x4b564d00-0x4b564def (0x4b564df0-0x4b564dff is reserved for PVM)
+/// Custom KVM MSRs fall in the range 0x4b564d00-0x4b564def (0x4b564df0-0x4b564dff is reserved for PVM)
 const MSR_KVM_WALL_CLOCK_NEW: u32 = 0x4b56_4d00;
 const MSR_KVM_SYSTEM_TIME_NEW: u32 = 0x4b56_4d01;
 const MSR_KVM_ASYNC_PF_EN: u32 = 0x4b56_4d02;
