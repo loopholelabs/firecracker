@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Basic tests scenarios for snapshot save/restore."""
 
+import dataclasses
 import filecmp
 import logging
 import os
@@ -9,12 +10,14 @@ import platform
 import re
 import shutil
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
 import host_tools.cargo_build as host
 import host_tools.drive as drive_tools
+import host_tools.network as net_tools
 from framework import utils
 from framework.microvm import SnapshotType
 from framework.properties import global_props
@@ -110,7 +113,7 @@ def test_snapshot_current_version(uvm_nano):
 # TODO: Multiple microvm sizes must be tested in the async pipeline.
 @pytest.mark.parametrize("snapshot_type", [SnapshotType.DIFF, SnapshotType.FULL])
 @pytest.mark.parametrize("use_snapshot_editor", [False, True])
-def test_5_snapshots(
+def test_cycled_snapshot_restore(
     bin_vsock_path,
     tmp_path,
     microvm_factory,
@@ -118,12 +121,17 @@ def test_5_snapshots(
     rootfs,
     snapshot_type,
     use_snapshot_editor,
+    cpu_template_any,
 ):
     """
-    Create and load 5 snapshots.
+    Run a cycle of VM restoration and VM snapshot creation where new VM is
+    restored from a snapshot of the previous one.
     """
+    # This is an arbitrary selected value. It is big enough to test the
+    # functionality, but small enough to not be annoying long to run.
+    cycles = 3
+
     logger = logging.getLogger("snapshot_sequence")
-    seq_len = 5
     diff_snapshots = snapshot_type == SnapshotType.DIFF
 
     vm = microvm_factory.build(guest_kernel, rootfs)
@@ -133,6 +141,7 @@ def test_5_snapshots(
         mem_size_mib=512,
         track_dirty_pages=diff_snapshots,
     )
+    vm.set_cpu_template(cpu_template_any)
     vm.add_net_iface()
     vm.api.vsock.put(vsock_id="vsock0", guest_cid=3, uds_path=VSOCK_UDS_PATH)
     vm.start()
@@ -150,7 +159,7 @@ def test_5_snapshots(
     vm.kill()
 
     for microvm in microvm_factory.build_n_from_snapshot(
-        snapshot, seq_len, incremental=True, use_snapshot_editor=use_snapshot_editor
+        snapshot, cycles, incremental=True, use_snapshot_editor=use_snapshot_editor
     ):
         # FIXME: This and the sleep below reduce the rate of vsock/ssh connection
         # related spurious test failures, although we do not know why this is the case.
@@ -570,3 +579,29 @@ def test_physical_counter_reset_aarch64(uvm_nano):
                 break
     else:
         raise RuntimeError("Did not find CNTPCT_EL0 register in snapshot")
+
+
+def test_snapshot_rename_interface(uvm_nano, microvm_factory):
+    """
+    Test that we can restore a snapshot and point its interface to a
+    different host interface.
+    """
+    vm = uvm_nano
+    base_iface = vm.add_net_iface()
+    vm.start()
+    snapshot = vm.snapshot_full()
+
+    # We don't reuse the network namespace as it may conflict with
+    # previous/future devices
+    restored_vm = microvm_factory.build(netns=net_tools.NetNs(str(uuid.uuid4())))
+    # Override the tap name, but keep the same IP configuration
+    iface_override = dataclasses.replace(base_iface, tap_name="tap_override")
+
+    restored_vm.spawn()
+    snapshot.net_ifaces.clear()
+    snapshot.net_ifaces.append(iface_override)
+    restored_vm.restore_from_snapshot(
+        snapshot,
+        rename_interfaces={iface_override.dev_name: iface_override.tap_name},
+        resume=True,
+    )

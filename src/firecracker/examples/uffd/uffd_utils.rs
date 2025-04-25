@@ -10,6 +10,7 @@ use std::fs::File;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::net::UnixStream;
 use std::ptr;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use userfaultfd::{Error, Event, Uffd};
@@ -32,7 +33,7 @@ pub struct GuestRegionUffdMapping {
     /// Offset in the backend file/buffer where the region contents are.
     pub offset: u64,
     /// The configured page size for this memory region.
-    pub page_size_kib: usize,
+    pub page_size: usize,
 }
 
 impl GuestRegionUffdMapping {
@@ -52,21 +53,48 @@ pub struct UffdHandler {
 }
 
 impl UffdHandler {
-    pub fn from_unix_stream(stream: &UnixStream, backing_buffer: *const u8, size: usize) -> Self {
+    fn try_get_mappings_and_file(
+        stream: &UnixStream,
+    ) -> Result<(String, Option<File>), std::io::Error> {
         let mut message_buf = vec![0u8; 1024];
-        let (bytes_read, file) = stream
-            .recv_with_fd(&mut message_buf[..])
-            .expect("Cannot read from a stream");
+        let (bytes_read, file) = stream.recv_with_fd(&mut message_buf[..])?;
         message_buf.resize(bytes_read, 0);
 
+        // We do not expect to receive non-UTF-8 data from Firecracker, so this is probably
+        // an error we can't recover from. Just immediately abort
         let body = String::from_utf8(message_buf.clone()).unwrap_or_else(|_| {
             panic!(
                 "Received body is not a utf-8 valid string. Raw bytes received: {message_buf:#?}"
             )
         });
-        let file =
-            file.unwrap_or_else(|| panic!("Did not receive Uffd from UDS. Received body: {body}"));
+        Ok((body, file))
+    }
 
+    fn get_mappings_and_file(stream: &UnixStream) -> (String, File) {
+        // Sometimes, reading from the stream succeeds but we don't receive any
+        // UFFD descriptor. We don't really have a good understanding why this is
+        // happening, but let's try to be a bit more robust and retry a few times
+        // before we declare defeat.
+        for _ in 1..=5 {
+            match Self::try_get_mappings_and_file(stream) {
+                Ok((body, Some(file))) => {
+                    return (body, file);
+                }
+                Ok((body, None)) => {
+                    println!("Didn't receive UFFD over socket. We received: '{body}'. Retrying...");
+                }
+                Err(err) => {
+                    println!("Could not get UFFD and mapping from Firecracker: {err}. Retrying...");
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        panic!("Could not get UFFD and mappings after 5 retries");
+    }
+
+    pub fn from_unix_stream(stream: &UnixStream, backing_buffer: *const u8, size: usize) -> Self {
+        let (body, file) = Self::get_mappings_and_file(stream);
         let mappings =
             serde_json::from_str::<Vec<GuestRegionUffdMapping>>(&body).unwrap_or_else(|_| {
                 panic!("Cannot deserialize memory mappings. Received body: {body}")
@@ -79,7 +107,7 @@ impl UffdHandler {
                 mappings.len()
             )
         });
-        let page_size = first_mapping.page_size_kib;
+        let page_size = first_mapping.page_size;
 
         // Make sure memory size matches backing data size.
         assert_eq!(memsize, size);
@@ -152,10 +180,7 @@ impl UffdHandler {
                     return false;
                 }
                 Err(Error::CopyFailed(errno))
-                    if std::io::Error::from(errno).raw_os_error().unwrap() == libc::EEXIST =>
-                {
-                    ()
-                }
+                    if std::io::Error::from(errno).raw_os_error().unwrap() == libc::EEXIST => {}
                 Err(e) => {
                     panic!("Uffd copy failed: {e:?}");
                 }
@@ -364,7 +389,7 @@ mod tests {
             base_host_virt_addr: 0,
             size: 0x1000,
             offset: 0,
-            page_size_kib: 4096,
+            page_size: 4096,
         }];
         let dummy_memory_region_json = serde_json::to_string(&dummy_memory_region).unwrap();
 
@@ -397,7 +422,7 @@ mod tests {
             base_host_virt_addr: 0,
             size: 0,
             offset: 0,
-            page_size_kib: 4096,
+            page_size: 4096,
         }];
         let error_memory_region_json = serde_json::to_string(&error_memory_region).unwrap();
         stream

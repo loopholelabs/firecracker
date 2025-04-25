@@ -16,14 +16,14 @@ path = "src/bin.rs"
 bench = false
 
 [dependencies]
-bincode = "1.2.1"
-clap = { version = "4.5.32", features = ["derive", "string"] }
+bincode = { version = "2.0.1", features = ["serde"] }
+clap = { version = "4.5.37", features = ["derive", "string"] }
 displaydoc = "0.2.5"
-libc = "0.2.171"
+libc = "0.2.172"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
-zerocopy = { version = "0.8.23" }
+zerocopy = { version = "0.8.24" }
 
 [lints]
 workspace = true

@@ -557,8 +557,6 @@ impl<'a> PrebootApiController<'a> {
         &mut self,
         load_params: &LoadSnapshotParams,
     ) -> Result<VmmData, LoadSnapshotError> {
-        log_dev_preview_warning("Virtual machine snapshots", Option::None);
-
         let load_start_us = get_time_us(ClockType::Monotonic);
 
         if self.boot_path {
@@ -592,15 +590,9 @@ impl<'a> PrebootApiController<'a> {
         // Set the VM
         self.built_vmm = Some(vmm);
 
-        log_dev_preview_warning(
-            "Virtual machine snapshots",
-            Some(format!(
-                "'load snapshot' VMM action took {} us.",
-                update_metric_with_elapsed_time(
-                    &METRICS.latencies_us.vmm_load_snapshot,
-                    load_start_us
-                )
-            )),
+        debug!(
+            "'load snapshot' VMM action took {} us.",
+            update_metric_with_elapsed_time(&METRICS.latencies_us.vmm_load_snapshot, load_start_us)
         );
 
         Ok(VmmData::Empty)
@@ -753,15 +745,15 @@ impl RuntimeApiController {
         &mut self,
         create_params: &CreateSnapshotParams,
     ) -> Result<VmmData, VmmActionError> {
-        log_dev_preview_warning("Virtual machine snapshots", None);
+        if create_params.snapshot_type == SnapshotType::Diff {
+            log_dev_preview_warning("Virtual machine diff snapshots", None);
 
-        if create_params.snapshot_type == SnapshotType::Diff
-            && !self.vm_resources.machine_config.track_dirty_pages
-        {
-            return Err(VmmActionError::NotSupported(
-                "Diff snapshots are not allowed on uVMs with dirty page tracking disabled."
-                    .to_string(),
-            ));
+            if !self.vm_resources.machine_config.track_dirty_pages {
+                return Err(VmmActionError::NotSupported(
+                    "Diff snapshots are not allowed on uVMs with dirty page tracking disabled."
+                        .to_string(),
+                ));
+            }
         }
 
         let mut locked_vmm = self.vmm.lock().unwrap();
@@ -828,14 +820,12 @@ impl RuntimeApiController {
         // vhost-user-block updates
         if new_cfg.path_on_host.is_none() && new_cfg.rate_limiter.is_none() {
             vmm.update_vhost_user_block_config(&new_cfg.drive_id)
-                .map(|()| VmmData::Empty)
                 .map_err(DriveError::DeviceUpdate)?;
         }
 
         // virtio-block updates
         if let Some(new_path) = new_cfg.path_on_host {
             vmm.update_block_device_path(&new_cfg.drive_id, new_path)
-                .map(|()| VmmData::Empty)
                 .map_err(DriveError::DeviceUpdate)?;
         }
         if new_cfg.rate_limiter.is_some() {
@@ -844,7 +834,6 @@ impl RuntimeApiController {
                 RateLimiterUpdate::from(new_cfg.rate_limiter).bandwidth,
                 RateLimiterUpdate::from(new_cfg.rate_limiter).ops,
             )
-            .map(|()| VmmData::Empty)
             .map_err(DriveError::DeviceUpdate)?;
         }
         Ok(VmmData::Empty)
@@ -1289,7 +1278,7 @@ mod tests {
                 },
                 enable_diff_snapshots: false,
                 resume_vm: false,
-                shared: false,
+                network_overrides: vec![],
             },
         )));
         check_unsupported(runtime_request(VmmAction::SetEntropyDevice(

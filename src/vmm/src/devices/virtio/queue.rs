@@ -531,13 +531,14 @@ impl Queue {
         // can prevent potential hanging and Denial-of-Service from
         // happening on the VMM side.
         if len > self.actual_size() {
+            // TODO: Remove this before push
             // We are choosing to interrupt execution since this could be a potential malicious
             // driver scenario. This way we also eliminate the risk of repeatedly
             // logging and potentially clogging the microVM through the log system.
-            panic!(
-                "The number of available virtio descriptors {len} is greater than queue size: {}!",
-                self.actual_size()
-            );
+            // panic!(
+            //     "The number of available virtio descriptors {len} is greater than queue size: {}!",
+            //     self.actual_size()
+            // );
         }
 
         if len == 0 {
@@ -659,15 +660,16 @@ impl Queue {
             // The number of descriptor chain heads to process should always
             // be smaller or equal to the queue size.
             if len > self.actual_size() {
+                // TODO: Remove this before push
                 // We are choosing to interrupt execution since this could be a potential malicious
                 // driver scenario. This way we also eliminate the risk of
                 // repeatedly logging and potentially clogging the microVM through
                 // the log system.
-                panic!(
-                    "The number of available virtio descriptors {len} is greater than queue size: \
-                     {}!",
-                    self.actual_size()
-                );
+                // panic!(
+                //     "The number of available virtio descriptors {len} is greater than queue size: \
+                //      {}!",
+                //     self.actual_size()
+                // );
             }
             return false;
         }

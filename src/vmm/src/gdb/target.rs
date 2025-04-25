@@ -33,7 +33,7 @@ use vm_memory::{Bytes, GuestAddress, GuestMemoryError};
 use super::arch;
 use crate::arch::GUEST_PAGE_SIZE;
 #[cfg(target_arch = "aarch64")]
-use crate::arch::aarch64::vcpu::VcpuError as AarchVcpuError;
+use crate::arch::aarch64::vcpu::VcpuArchError as AarchVcpuError;
 use crate::logger::{error, info};
 use crate::utils::u64_to_usize;
 use crate::vstate::vcpu::VcpuSendEventError;
@@ -399,7 +399,8 @@ impl MultiThreadBase for FirecrackerTarget {
                 GUEST_PAGE_SIZE - (u64_to_usize(gpa) & (GUEST_PAGE_SIZE - 1)),
             );
 
-            vmm.guest_memory()
+            vmm.vm
+                .guest_memory()
                 .read(&mut data[..read_len], GuestAddress(gpa as u64))
                 .map_err(|e| {
                     error!("Error reading memory {e:?} gpa is {gpa}");
@@ -433,7 +434,8 @@ impl MultiThreadBase for FirecrackerTarget {
                 GUEST_PAGE_SIZE - (u64_to_usize(gpa) & (GUEST_PAGE_SIZE - 1)),
             );
 
-            vmm.guest_memory()
+            vmm.vm
+                .guest_memory()
                 .write(&data[..write_len], GuestAddress(gpa))
                 .map_err(|e| {
                     error!("Error {e:?} writing memory at {gpa:#X}");
