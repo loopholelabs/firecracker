@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use vmm::builder::build_and_boot_microvm;
 use vmm::devices::virtio::block::CacheType;
-use vmm::persist::{MicrovmState, MicrovmStateError, VmInfo, snapshot_state_sanity_check};
+use vmm::persist::{
+    MicrovmState, MicrovmStateError, SnapshotStateFromFileError, VmInfo,
+    snapshot_state_sanity_check,
+};
 use vmm::resources::VmResources;
 use vmm::rpc_interface::{
     LoadSnapshotError, PrebootApiController, RuntimeApiController, VmmAction, VmmActionError,
@@ -16,6 +19,7 @@ use vmm::seccomp::get_empty_filters;
 use vmm::snapshot::Snapshot;
 use vmm::test_utils::mock_resources::{MockVmResources, NOISY_KERNEL_IMAGE};
 use vmm::test_utils::{create_vmm, default_vmm, default_vmm_no_boot};
+use vmm::utils::u64_to_usize;
 use vmm::vmm_config::balloon::BalloonDeviceConfig;
 use vmm::vmm_config::boot_source::BootSourceConfig;
 use vmm::vmm_config::drive::BlockDeviceConfig;
@@ -225,9 +229,10 @@ fn verify_create_snapshot(is_diff: bool) -> (TempFile, TempFile) {
     vmm.lock().unwrap().stop(FcExitCode::Ok);
 
     // Check that we can deserialize the microVM state from `snapshot_file`.
-    let snapshot_path = snapshot_file.as_path().to_path_buf();
-    let snapshot_file_metadata = std::fs::metadata(snapshot_path).unwrap();
-    let snapshot_len = snapshot_file_metadata.len() as usize;
+    let raw_snapshot_len: u64 = Snapshot::deserialize(&mut snapshot_file.as_file())
+        .map_err(SnapshotStateFromFileError::Meta)
+        .unwrap();
+    let snapshot_len = u64_to_usize(raw_snapshot_len);
     let (restored_microvm_state, _) =
         Snapshot::load::<_, MicrovmState>(&mut snapshot_file.as_file(), snapshot_len).unwrap();
 
@@ -265,6 +270,7 @@ fn verify_load_snapshot(snapshot_file: TempFile, memory_file: TempFile) {
             enable_diff_snapshots: false,
             resume_vm: true,
             network_overrides: vec![],
+            shared: false,
         }))
         .unwrap();
 
@@ -314,11 +320,13 @@ fn test_snapshot_load_sanity_checks() {
 fn get_microvm_state_from_snapshot() -> MicrovmState {
     // Create a diff snapshot
     let (snapshot_file, _) = verify_create_snapshot(true);
+    snapshot_file.as_file().seek(SeekFrom::Start(0)).unwrap();
 
     // Deserialize the microVM state.
-    let snapshot_file_metadata = snapshot_file.as_file().metadata().unwrap();
-    let snapshot_len = snapshot_file_metadata.len() as usize;
-    snapshot_file.as_file().seek(SeekFrom::Start(0)).unwrap();
+    let raw_snapshot_len: u64 = Snapshot::deserialize(&mut snapshot_file.as_file())
+        .map_err(SnapshotStateFromFileError::Meta)
+        .unwrap();
+    let snapshot_len = u64_to_usize(raw_snapshot_len);
     let (state, _) = Snapshot::load(&mut snapshot_file.as_file(), snapshot_len).unwrap();
     state
 }
@@ -349,6 +357,7 @@ fn verify_load_snap_disallowed_after_boot_resources(res: VmmAction, res_name: &s
         enable_diff_snapshots: false,
         resume_vm: false,
         network_overrides: vec![],
+        shared: false,
     });
     let err = preboot_api_controller.handle_preboot_request(req);
     assert!(
