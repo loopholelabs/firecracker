@@ -77,16 +77,27 @@ class UffdHandler:
             return ""
         return self.log_file.read_text(encoding="utf-8")
 
+    def kill(self):
+        """Kills the uffd handler process"""
+        assert self.is_running()
+
+        self.proc.kill()
+
+    def mark_killed(self):
+        """Marks the uffd handler as already dead"""
+        assert not self.is_running()
+
+        self._proc = None
+
     def __del__(self):
         """Tear down the UFFD handler process."""
-        if self.proc is not None:
-            self.proc.kill()
+        if self.is_running():
+            self.kill()
 
 
-def spawn_pf_handler(vm, handler_path, snapshot):
+def spawn_pf_handler(vm, handler_path, jailed_snapshot):
     """Spawn page fault handler process."""
     # Copy snapshot memory file into chroot of microVM.
-    jailed_snapshot = snapshot.copy_to_chroot(Path(vm.chroot()))
     # Copy the valid page fault binary into chroot of microVM.
     jailed_handler = vm.create_jailed_resource(handler_path)
     handler_name = os.path.basename(jailed_handler)
@@ -95,7 +106,6 @@ def spawn_pf_handler(vm, handler_path, snapshot):
         handler_name, SOCKET_PATH, jailed_snapshot, vm.chroot(), "uffd.log"
     )
     uffd_handler.spawn(vm.jailer.uid, vm.jailer.gid)
-    vm.uffd_handler = uffd_handler
 
     return uffd_handler
 

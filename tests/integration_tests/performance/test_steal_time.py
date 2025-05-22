@@ -1,13 +1,9 @@
 # Copyright 2025 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for verifying the PVTime device behavior under contention and across snapshots."""
+"""Tests for verifying the steal time behavior under contention and across snapshots."""
 
 import time
-
-import pytest
-
-from framework.properties import global_props
 
 
 def get_steal_time_ms(vm):
@@ -16,25 +12,6 @@ def get_steal_time_ms(vm):
     steal_time_tck = int(out.strip().split()[8])
     clk_tck = int(vm.ssh.run("getconf CLK_TCK").stdout)
     return steal_time_tck / clk_tck * 1000
-
-
-@pytest.mark.skipif(
-    global_props.cpu_architecture != "aarch64", reason="Only run in aarch64"
-)
-def test_guest_has_pvtime_enabled(uvm_plain):
-    """
-    Check that the guest kernel has enabled PV steal time.
-    """
-    vm = uvm_plain
-    vm.spawn()
-    vm.basic_config()
-    vm.add_net_iface()
-    vm.start()
-
-    _, stdout, _ = vm.ssh.run("dmesg | grep 'stolen time PV'")
-    assert (
-        "stolen time PV" in stdout
-    ), "Guest kernel did not report PV steal time enabled"
 
 
 def test_pvtime_steal_time_increases(uvm_plain):
@@ -104,18 +81,19 @@ def test_pvtime_snapshot(uvm_plain, microvm_factory):
     # Steal time just after restoring
     steal_after_snap = get_steal_time_ms(restored_vm)
 
+    # Ensure steal time persisted
+    tolerance = 10000  # 10.0 seconds tolerance for persistence check
+    persisted = (
+        steal_before < steal_after_snap and steal_after_snap - steal_before < tolerance
+    )
+    assert persisted, "Steal time did not persist through snapshot"
+
     time.sleep(2)
 
     # Steal time after running resumed VM
     steal_after_resume = get_steal_time_ms(restored_vm)
 
-    # Ensure steal time persisted and continued increasing
-    tolerance = 10000  # 10.0 seconds tolerance for persistence check
-    persisted = (
-        steal_before < steal_after_snap and steal_after_snap - steal_before < tolerance
-    )
-    increased = steal_after_resume > steal_after_snap
-
+    # Ensure steal time continued increasing
     assert (
-        persisted and increased
-    ), "Steal time did not persist through snapshot or failed to increase after resume"
+        steal_after_resume > steal_after_snap
+    ), "Steal time failed to increase after resume"
