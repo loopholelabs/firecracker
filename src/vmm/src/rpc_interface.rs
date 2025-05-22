@@ -783,6 +783,26 @@ impl RuntimeApiController {
                     elapsed_time_us
                 );
             }
+            SnapshotType::Msync => {
+                let elapsed_time_us = update_metric_with_elapsed_time(
+                    &METRICS.latencies_us.msync_create_snapshot,
+                    create_start_us,
+                );
+                info!(
+                    "'create memory synchronization snapshot' VMM action took {} us.",
+                    elapsed_time_us
+                );
+            }
+            SnapshotType::MsyncAndState => {
+                let elapsed_time_us = update_metric_with_elapsed_time(
+                    &METRICS.latencies_us.msync_and_state_create_snapshot,
+                    create_start_us,
+                );
+                info!(
+                    "'create memory synchronization and state snapshot' VMM action took {} us.",
+                    elapsed_time_us
+                );
+            }
         }
         Ok(VmmData::Empty)
     }
