@@ -128,8 +128,15 @@ pub fn snapshot_file(
     file: File,
     regions: impl Iterator<Item = (GuestAddress, usize)>,
     track_dirty_pages: bool,
+    shared: bool,
 ) -> Result<Vec<GuestRegionMmap>, MemoryError> {
-    create(regions, libc::MAP_PRIVATE, Some(file), track_dirty_pages)
+    let flags = if shared {
+        libc::MAP_NORESERVE | libc::MAP_SHARED
+    } else {
+        libc::MAP_NORESERVE | libc::MAP_PRIVATE
+    };
+
+    create(regions, flags, Some(file), track_dirty_pages)
 }
 
 /// Defines the interface for snapshotting memory.
@@ -158,6 +165,9 @@ where
 
     /// Store the dirty bitmap in internal store
     fn store_dirty_bitmap(&self, dirty_bitmap: &DirtyBitmap, page_size: usize);
+
+    /// Flushes memory contents to disk.
+    fn msync(&self) -> std::result::Result<(), MemoryError>;
 }
 
 /// State of a guest memory region saved to file/buffer.
@@ -307,6 +317,20 @@ impl GuestMemoryExtension for GuestMemoryMmap {
                 }
             }
         });
+    }
+
+    fn msync(&self) -> std::result::Result<(), MemoryError> {
+        self.iter().for_each(|region| {
+            // SAFETY: It is safe to call `msync()` on both an anonymous (where it is a nop) and shared (where it flushes to disk) region
+            unsafe {
+                libc::msync(
+                    region.as_ptr().cast::<libc::c_void>(),
+                    region.size(),
+                    libc::MS_SYNC,
+                );
+            }
+        });
+        Ok(())
     }
 }
 
