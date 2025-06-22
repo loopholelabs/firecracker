@@ -34,7 +34,7 @@ import host_tools.cargo_build as build_tools
 from framework import defs, utils
 from framework.artifacts import disks, kernel_params
 from framework.defs import DEFAULT_BINARY_DIR
-from framework.microvm import MicroVMFactory
+from framework.microvm import MicroVMFactory, SnapshotType
 from framework.properties import global_props
 from framework.utils_cpu_templates import (
     custom_cpu_templates_params,
@@ -258,6 +258,17 @@ def waitpkg_bin(test_fc_session_root_path):
     yield waitpkg_bin_path
 
 
+@pytest.fixture(scope="session")
+def msr_reader_bin(test_fc_session_root_path):
+    """Build a binary that reads msrs"""
+    msr_reader_bin_path = os.path.join(test_fc_session_root_path, "msr_reader")
+    build_tools.gcc_compile(
+        "data/msr/msr_reader.c",
+        msr_reader_bin_path,
+    )
+    yield msr_reader_bin_path
+
+
 @pytest.fixture
 def bin_seccomp_paths():
     """Build jailers and jailed binaries to test seccomp.
@@ -397,6 +408,12 @@ def cpu_template_any(request, record_property):
 @pytest.fixture(params=["Sync", "Async"])
 def io_engine(request):
     """All supported io_engines"""
+    return request.param
+
+
+@pytest.fixture(params=[SnapshotType.DIFF, SnapshotType.FULL])
+def snapshot_type(request):
+    """All possible snapshot types"""
     return request.param
 
 

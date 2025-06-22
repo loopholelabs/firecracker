@@ -4,7 +4,7 @@ FROM public.ecr.aws/lts/ubuntu:24.04
 # The Rust toolchain layer will get updated most frequently, but we could keep the system
 # dependencies layer intact for much longer.
 
-ARG RUST_TOOLCHAIN="1.85.0"
+ARG RUST_TOOLCHAIN="1.87.0"
 ARG TMP_BUILD_DIR=/tmp/build
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PIP_BREAK_SYSTEM_PACKAGES=1
@@ -102,6 +102,12 @@ ENV PATH=$VENV/bin:$PATH
 # apt-get installs it globally, to manually copy it into the venv
 RUN cp /usr/lib/python3/dist-packages/seccomp.cpython-312-"$ARCH"-linux-gnu.so "$VENV"/lib/python3.12/site-packages/
 
+RUN git clone https://github.com/awslabs/git-secrets /tmp/git-secrets \
+    && cd /tmp/git-secrets \
+    && make install \
+    && cd - \
+    && rm -rf /tmp/git-secrets
+
 # Running the three as a single dockerfile command to avoid inflation of the image:
 # - Install the Rust toolchain.
 # - Kani always installs _some_ nightly toolchain, we reuse it for the seccomp filter analysis test. Dynamically
@@ -150,7 +156,7 @@ RUN cd /usr/include/$ARCH-linux-musl \
     && ln -s ../asm-generic asm-generic
 
 # Install static version of libseccomp
-# We need to compile from source because 
+# We need to compile from source because
 # libseccomp provided by the distribution is not
 # compiled with musl-gcc and we need this
 # for our musl builds.

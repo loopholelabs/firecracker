@@ -36,7 +36,7 @@ pipeline.add_step(
 if any(x.parent.name == "devctr" for x in changed_files):
     pipeline.build_group_per_arch(
         "🐋 Dev Container Sanity Build",
-        "./tools/devtool -y build_devctr && DEVCTR_IMAGE_TAG=latest ./tools/devtool test -- integration_tests/functional/test_api.py",
+        "./tools/devtool -y build_devctr && DEVCTR_IMAGE_TAG=latest ./tools/devtool test --no-build -- integration_tests/functional/test_api.py",
     )
 
 if any(
@@ -46,12 +46,14 @@ if any(
     pipeline.build_group_per_arch(
         "📦 Release Sanity Build",
         "./tools/devtool -y make_release",
+        depends_on_build=False,
     )
 
 if not pipeline.args.no_kani and (
     not changed_files
     or any(x.suffix in [".rs", ".toml", ".lock"] for x in changed_files)
     or any(x.parent.name == "devctr" for x in changed_files)
+    or any(x.name == "test_kani.py" for x in changed_files)
 ):
     kani_grp = pipeline.build_group(
         "🔍 Kani",

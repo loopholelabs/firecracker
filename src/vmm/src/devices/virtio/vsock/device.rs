@@ -32,7 +32,7 @@ use super::{VsockBackend, defs};
 use crate::devices::virtio::ActivateError;
 use crate::devices::virtio::device::{DeviceState, IrqTrigger, IrqType, VirtioDevice};
 use crate::devices::virtio::generated::virtio_config::{VIRTIO_F_IN_ORDER, VIRTIO_F_VERSION_1};
-use crate::devices::virtio::queue::Queue as VirtQueue;
+use crate::devices::virtio::queue::{InvalidAvailIdx, Queue as VirtQueue};
 use crate::devices::virtio::vsock::VsockError;
 use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::logger::IncMetric;
@@ -145,13 +145,14 @@ where
     /// Walk the driver-provided RX queue buffers and attempt to fill them up with any data that we
     /// have pending. Return `true` if descriptors have been added to the used ring, and `false`
     /// otherwise.
-    pub fn process_rx(&mut self) -> bool {
+    pub fn process_rx(&mut self) -> Result<bool, InvalidAvailIdx> {
         // This is safe since we checked in the event handler that the device is activated.
         let mem = self.device_state.mem().unwrap();
 
+        let queue = &mut self.queues[RXQ_INDEX];
         let mut have_used = false;
 
-        while let Some(head) = self.queues[RXQ_INDEX].pop() {
+        while let Some(head) = queue.pop()? {
             let index = head.index;
             let used_len = match self.rx_packet.parse(mem, head) {
                 Ok(()) => {
@@ -174,7 +175,7 @@ where
                         // We are using a consuming iterator over the virtio buffers, so, if we
                         // can't fill in this buffer, we'll need to undo the
                         // last iterator step.
-                        self.queues[RXQ_INDEX].undo_pop();
+                        queue.undo_pop();
                         break;
                     }
                 }
@@ -185,26 +186,26 @@ where
             };
 
             have_used = true;
-            self.queues[RXQ_INDEX]
-                .add_used(index, used_len)
-                .unwrap_or_else(|err| {
-                    error!("Failed to add available descriptor {}: {}", index, err)
-                });
+            queue.add_used(index, used_len).unwrap_or_else(|err| {
+                error!("Failed to add available descriptor {}: {}", index, err)
+            });
         }
+        queue.advance_used_ring_idx();
 
-        have_used
+        Ok(have_used)
     }
 
     /// Walk the driver-provided TX queue buffers, package them up as vsock packets, and send them
     /// to the backend for processing. Return `true` if descriptors have been added to the used
     /// ring, and `false` otherwise.
-    pub fn process_tx(&mut self) -> bool {
+    pub fn process_tx(&mut self) -> Result<bool, InvalidAvailIdx> {
         // This is safe since we checked in the event handler that the device is activated.
         let mem = self.device_state.mem().unwrap();
 
+        let queue = &mut self.queues[TXQ_INDEX];
         let mut have_used = false;
 
-        while let Some(head) = self.queues[TXQ_INDEX].pop() {
+        while let Some(head) = queue.pop()? {
             let index = head.index;
             // let pkt = match VsockPacket::from_tx_virtq_head(mem, head) {
             match self.tx_packet.parse(mem, head) {
@@ -212,29 +213,26 @@ where
                 Err(err) => {
                     error!("vsock: error reading TX packet: {:?}", err);
                     have_used = true;
-                    self.queues[TXQ_INDEX]
-                        .add_used(index, 0)
-                        .unwrap_or_else(|err| {
-                            error!("Failed to add available descriptor {}: {}", index, err);
-                        });
+                    queue.add_used(index, 0).unwrap_or_else(|err| {
+                        error!("Failed to add available descriptor {}: {}", index, err);
+                    });
                     continue;
                 }
             };
 
             if self.backend.send_pkt(&self.tx_packet).is_err() {
-                self.queues[TXQ_INDEX].undo_pop();
+                queue.undo_pop();
                 break;
             }
 
             have_used = true;
-            self.queues[TXQ_INDEX]
-                .add_used(index, 0)
-                .unwrap_or_else(|err| {
-                    error!("Failed to add available descriptor {}: {}", index, err);
-                });
+            queue.add_used(index, 0).unwrap_or_else(|err| {
+                error!("Failed to add available descriptor {}: {}", index, err);
+            });
         }
+        queue.advance_used_ring_idx();
 
-        have_used
+        Ok(have_used)
     }
 
     // Send TRANSPORT_RESET_EVENT to driver. According to specs, the driver shuts down established
@@ -244,7 +242,8 @@ where
         // This is safe since we checked in the caller function that the device is activated.
         let mem = self.device_state.mem().unwrap();
 
-        let head = self.queues[EVQ_INDEX].pop().ok_or_else(|| {
+        let queue = &mut self.queues[EVQ_INDEX];
+        let head = queue.pop()?.ok_or_else(|| {
             METRICS.ev_queue_event_fails.inc();
             DeviceError::VsockError(VsockError::EmptyQueue)
         })?;
@@ -252,11 +251,10 @@ where
         mem.write_obj::<u32>(VIRTIO_VSOCK_EVENT_TRANSPORT_RESET, head.addr)
             .unwrap_or_else(|err| error!("Failed to write virtio vsock reset event: {:?}", err));
 
-        self.queues[EVQ_INDEX]
-            .add_used(head.index, head.len)
-            .unwrap_or_else(|err| {
-                error!("Failed to add used descriptor {}: {}", head.index, err);
-            });
+        queue.add_used(head.index, head.len).unwrap_or_else(|err| {
+            error!("Failed to add used descriptor {}: {}", head.index, err);
+        });
+        queue.advance_used_ring_idx();
 
         self.signal_used_queue()?;
 

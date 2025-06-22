@@ -11,11 +11,7 @@ from tenacity import Retrying, stop_after_attempt, wait_fixed
 from framework import utils
 
 # The iperf version to run this tests with
-IPERF_BINARY_GUEST = "iperf3"
-# We are using iperf3-vsock instead of a regular iperf3,
-# because iperf3 3.16+ crashes on aarch64 sometimes
-# when running this test.
-IPERF_BINARY_HOST = "iperf3-vsock"
+IPERF_BINARY = "iperf3"
 
 
 def test_high_ingress_traffic(uvm_plain_any):
@@ -38,7 +34,7 @@ def test_high_ingress_traffic(uvm_plain_any):
     test_microvm.start()
 
     # Start iperf3 server on the guest.
-    test_microvm.ssh.check_output("{} -sD\n".format(IPERF_BINARY_GUEST))
+    test_microvm.ssh.check_output("{} -sD\n".format(IPERF_BINARY))
     time.sleep(1)
 
     # Start iperf3 client on the host. Send 1Gbps UDP traffic.
@@ -46,7 +42,7 @@ def test_high_ingress_traffic(uvm_plain_any):
     utils.check_output(
         "{} {} -c {} -u -V -b 1000000000 -t 30".format(
             test_microvm.netns.cmd_prefix(),
-            IPERF_BINARY_HOST,
+            IPERF_BINARY,
             guest_ip,
         ),
     )
@@ -112,8 +108,11 @@ def test_tap_offload(uvm_any):
     # Start a UDP server in the guest
     # vm.ssh.check_output(f"nohup socat UDP-LISTEN:{port} - > {out_filename} &")
     vm.ssh.check_output(
-        f"nohup socat UDP4-LISTEN:{port} OPEN:{out_filename},creat > /dev/null 2>&1 &"
+        f"nohup socat UDP4-LISTEN:{port} CREATE:{out_filename} > /dev/null 2>&1 &"
     )
+
+    # wait for socat server to spin up
+    time.sleep(1)
 
     # Try to send a UDP message from host with UDP offload enabled
     vm.netns.check_output(f"python3 ./host_tools/udp_offload.py {vm.ssh.host} {port}")

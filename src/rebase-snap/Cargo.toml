@@ -9,17 +9,17 @@ license = "Apache-2.0"
 name = "rebase-snap"
 bench = false
 
-[dependencies]
-displaydoc = "0.2.5"
-libc = "0.2.172"
-log-instrument = { path = "../log-instrument", optional = true }
-thiserror = "2.0.12"
-vmm-sys-util = "0.12.1"
-
-utils = { path = "../utils" }
-
 [features]
 tracing = ["log-instrument", "utils/tracing"]
+
+[dependencies]
+displaydoc = "0.2.5"
+libc = "0.2.173"
+log-instrument = { path = "../log-instrument", optional = true }
+thiserror = "2.0.12"
+vmm-sys-util = "0.14.0"
+
+utils = { path = "../utils" }
 
 [lints]
 workspace = true

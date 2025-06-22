@@ -16,8 +16,8 @@ from collections import defaultdict, namedtuple
 from contextlib import contextmanager
 from typing import Dict
 
-import packaging.version
 import psutil
+import semver
 from tenacity import (
     Retrying,
     retry,
@@ -34,11 +34,15 @@ GET_CPU_LOAD = "top -bn1 -H -p {} -w512 | tail -n+8"
 
 def get_threads(pid: int) -> dict:
     """Return dict consisting of child threads."""
-    threads_map = defaultdict(list)
-    proc = psutil.Process(pid)
-    for thread in proc.threads():
-        threads_map[psutil.Process(thread.id).name()].append(thread.id)
-    return threads_map
+    try:
+        proc = psutil.Process(pid)
+
+        threads_map = defaultdict(list)
+        for thread in proc.threads():
+            threads_map[psutil.Process(thread.id).name()].append(thread.id)
+        return threads_map
+    except psutil.NoSuchProcess:
+        return {}
 
 
 def get_cpu_affinity(pid: int) -> list:
@@ -377,7 +381,7 @@ def get_firecracker_version_from_toml():
     """
     cmd = "cd ../src/firecracker && cargo pkgid | cut -d# -f2 | cut -d: -f2"
     _, stdout, _ = check_output(cmd)
-    return packaging.version.parse(stdout)
+    return semver.Version.parse(stdout)
 
 
 def get_kernel_version(level=2):
