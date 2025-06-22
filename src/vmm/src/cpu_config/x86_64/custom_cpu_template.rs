@@ -39,7 +39,7 @@ impl GetCpuTemplate for Option<CpuTemplateType> {
 
                     let cpu_model = CpuModel::get_cpu_model();
                     if !template.get_supported_cpu_models().contains(&cpu_model) {
-                        // TODO: Remove this before push
+                        // Disable the CPU compatibility to check to allow using templates like T2A on more modern CPUs
                         // return Err(InvalidCpuModel);
                     }
 

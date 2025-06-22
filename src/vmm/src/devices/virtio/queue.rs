@@ -535,19 +535,18 @@ impl Queue {
     /// own.
     pub fn pop(&mut self) -> Result<Option<DescriptorChain>, InvalidAvailIdx> {
         let len = self.len();
-        // TODO: Remove this before push
-        // // The number of descriptor chain heads to process should always
-        // // be smaller or equal to the queue size, as the driver should
-        // // never ask the VMM to process a available ring entry more than
-        // // once. Checking and reporting such incorrect driver behavior
-        // // can prevent potential hanging and Denial-of-Service from
-        // // happening on the VMM side.
-        // if self.size < len {
-        //     return Err(InvalidAvailIdx {
-        //         queue_size: self.size,
-        //         reported_len: len,
-        //     });
-        // }
+        // The number of descriptor chain heads to process should always
+        // be smaller or equal to the queue size, as the driver should
+        // never ask the VMM to process a available ring entry more than
+        // once. Checking and reporting such incorrect driver behavior
+        // can prevent potential hanging and Denial-of-Service from
+        // happening on the VMM side.
+        if self.size < len {
+            return Err(InvalidAvailIdx {
+                queue_size: self.size,
+                reported_len: len,
+            });
+        }
 
         if len == 0 {
             return Ok(None);
@@ -677,15 +676,15 @@ impl Queue {
 
         let len = self.len();
         if len != 0 {
-            // TODO: Remove this before push
-            // // The number of descriptor chain heads to process should always
-            // // be smaller or equal to the queue size.
-            // if len > self.size {
-            //     return Err(InvalidAvailIdx {
-            //         queue_size: self.size,
-            //         reported_len: len,
-            //     });
-            // }
+            // The number of descriptor chain heads to process should always
+            // be smaller or equal to the queue size.
+            if len > self.size {
+                return Err(InvalidAvailIdx {
+                    queue_size: self.size,
+                    reported_len: len,
+                });
+            }
+
             return Ok(false);
         }
 
