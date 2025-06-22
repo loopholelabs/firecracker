@@ -684,7 +684,6 @@ impl Queue {
                     reported_len: len,
                 });
             }
-
             return Ok(false);
         }
 
