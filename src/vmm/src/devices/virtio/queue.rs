@@ -5,7 +5,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use std::cmp::min;
 use std::num::Wrapping;
 use std::sync::atomic::{Ordering, fence};
 
@@ -28,14 +27,28 @@ pub(super) const FIRECRACKER_MAX_QUEUE_SIZE: u16 = 256;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum QueueError {
-    /// Virtio queue number of available descriptors {0} is greater than queue size {1}.
-    InvalidQueueSize(u16, u16),
     /// Descriptor index out of bounds: {0}.
     DescIndexOutOfBounds(u16),
     /// Failed to write value into the virtio queue used ring: {0}
     MemoryError(#[from] vm_memory::GuestMemoryError),
     /// Pointer is not aligned properly: {0:#x} not {1}-byte aligned.
     PointerNotAligned(usize, u8),
+}
+
+/// Error type indicating the guest configured a virtio queue such that the avail_idx field would
+/// indicate there are more descriptors to process than the queue actually has space for.
+///
+/// Should this error bubble up to the event loop, we exit Firecracker, since this could be a
+/// potential malicious driver scenario. This way we also eliminate the risk of repeatedly
+/// logging and potentially clogging the microVM through the log system.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "The number of available virtio descriptors {reported_len} is greater than queue size: \
+     {queue_size}!"
+)]
+pub struct InvalidAvailIdx {
+    queue_size: u16,
+    reported_len: u16,
 }
 
 /// A virtio descriptor constraints with C representative.
@@ -448,17 +461,6 @@ impl Queue {
         }
     }
 
-    /// Maximum size of the queue.
-    pub fn get_max_size(&self) -> u16 {
-        self.max_size
-    }
-
-    /// Return the actual size of the queue, as the driver may not set up a
-    /// queue as big as the device allows.
-    pub fn actual_size(&self) -> u16 {
-        min(self.size, self.max_size)
-    }
-
     /// Validates the queue's in-memory layout is correct.
     pub fn is_valid<M: GuestMemory>(&self, mem: &M) -> bool {
         let desc_table = self.desc_table_address;
@@ -522,7 +524,16 @@ impl Queue {
     }
 
     /// Pop the first available descriptor chain from the avail ring.
-    pub fn pop(&mut self) -> Option<DescriptorChain> {
+    ///
+    /// If this function returns an error at runtime, then the guest has requested Firecracker
+    /// to process more virtio descriptors than there can possibly be given the queue's size.
+    /// This can be a malicious guest driver scenario, and hence a DoS attempt. If encountered
+    /// and runtime, correct handling is to panic!
+    ///
+    /// This function however is also called on paths that can (and should) just report
+    /// the error to the user (e.g. loading a corrupt snapshot file), and hence cannot panic on its
+    /// own.
+    pub fn pop(&mut self) -> Result<Option<DescriptorChain>, InvalidAvailIdx> {
         let len = self.len();
         // The number of descriptor chain heads to process should always
         // be smaller or equal to the queue size, as the driver should
@@ -530,36 +541,43 @@ impl Queue {
         // once. Checking and reporting such incorrect driver behavior
         // can prevent potential hanging and Denial-of-Service from
         // happening on the VMM side.
-        if len > self.actual_size() {
-            // TODO: Remove this before push
-            // We are choosing to interrupt execution since this could be a potential malicious
-            // driver scenario. This way we also eliminate the risk of repeatedly
-            // logging and potentially clogging the microVM through the log system.
-            // panic!(
-            //     "The number of available virtio descriptors {len} is greater than queue size: {}!",
-            //     self.actual_size()
-            // );
+        if self.size < len {
+            return Err(InvalidAvailIdx {
+                queue_size: self.size,
+                reported_len: len,
+            });
         }
 
         if len == 0 {
-            return None;
+            return Ok(None);
         }
 
-        self.pop_unchecked()
+        Ok(self.pop_unchecked())
     }
 
     /// Try to pop the first available descriptor chain from the avail ring.
     /// If no descriptor is available, enable notifications.
-    pub fn pop_or_enable_notification(&mut self) -> Option<DescriptorChain> {
+    ///
+    /// If this function returns an error at runtime, then the guest has requested Firecracker
+    /// to process more virtio descriptors than there can possibly be given the queue's size.
+    /// This can be a malicious guest driver scenario, and hence a DoS attempt. If encountered
+    /// and runtime, correct handling is to panic!
+    ///
+    /// This function however is also called on paths that can (and should) just report
+    /// the error to the user (e.g. loading a corrupt snapshot file), and hence cannot panic on its
+    /// own.
+    pub fn pop_or_enable_notification(
+        &mut self,
+    ) -> Result<Option<DescriptorChain>, InvalidAvailIdx> {
         if !self.uses_notif_suppression {
             return self.pop();
         }
 
-        if self.try_enable_notification() {
-            return None;
+        if self.try_enable_notification()? {
+            return Ok(None);
         }
 
-        self.pop_unchecked()
+        Ok(self.pop_unchecked())
     }
 
     /// Pop the first available descriptor chain from the avail ring.
@@ -577,17 +595,15 @@ impl Queue {
         //
         // We use `self.next_avail` to store the position, in `ring`, of the next available
         // descriptor index, with a twist: we always only increment `self.next_avail`, so the
-        // actual position will be `self.next_avail % self.actual_size()`.
-        let idx = self.next_avail.0 % self.actual_size();
+        // actual position will be `self.next_avail % self.size`.
+        let idx = self.next_avail.0 % self.size;
         // SAFETY:
         // index is bound by the queue size
         let desc_index = unsafe { self.avail_ring_ring_get(usize::from(idx)) };
 
-        DescriptorChain::checked_new(self.desc_table_ptr, self.actual_size(), desc_index).inspect(
-            |_| {
-                self.next_avail += Wrapping(1);
-            },
-        )
+        DescriptorChain::checked_new(self.desc_table_ptr, self.size, desc_index).inspect(|_| {
+            self.next_avail += Wrapping(1);
+        })
     }
 
     /// Undo the effects of the last `self.pop()` call.
@@ -605,7 +621,7 @@ impl Queue {
         desc_index: u16,
         len: u32,
     ) -> Result<(), QueueError> {
-        if self.actual_size() <= desc_index {
+        if self.size <= desc_index {
             error!(
                 "attempted to add out of bounds descriptor to used ring: {}",
                 desc_index
@@ -613,7 +629,7 @@ impl Queue {
             return Err(QueueError::DescIndexOutOfBounds(desc_index));
         }
 
-        let next_used = (self.next_used + Wrapping(ring_index_offset)).0 % self.actual_size();
+        let next_used = (self.next_used + Wrapping(ring_index_offset)).0 % self.size;
         let used_element = UsedElement {
             id: u32::from(desc_index),
             len,
@@ -627,20 +643,23 @@ impl Queue {
     }
 
     /// Advance queue and used ring by `n` elements.
-    pub fn advance_used_ring(&mut self, n: u16) {
+    pub fn advance_next_used(&mut self, n: u16) {
         self.num_added += Wrapping(n);
         self.next_used += Wrapping(n);
+    }
 
+    /// Set the used ring index to the current `next_used` value.
+    /// Should be called once after number of `add_used` calls.
+    pub fn advance_used_ring_idx(&mut self) {
         // This fence ensures all descriptor writes are visible before the index update is.
         fence(Ordering::Release);
-
         self.used_ring_idx_set(self.next_used.0);
     }
 
     /// Puts an available descriptor head into the used ring for use by the guest.
     pub fn add_used(&mut self, desc_index: u16, len: u32) -> Result<(), QueueError> {
         self.write_used_element(0, desc_index, len)?;
-        self.advance_used_ring(1);
+        self.advance_next_used(1);
         Ok(())
     }
 
@@ -648,30 +667,24 @@ impl Queue {
     /// successfully enabled. Otherwise it means that one or more descriptors can still be consumed
     /// from the available ring and we can't guarantee that there will be a notification. In this
     /// case the caller might want to consume the mentioned descriptors and call this method again.
-    pub fn try_enable_notification(&mut self) -> bool {
+    fn try_enable_notification(&mut self) -> Result<bool, InvalidAvailIdx> {
         // If the device doesn't use notification suppression, we'll continue to get notifications
         // no matter what.
         if !self.uses_notif_suppression {
-            return true;
+            return Ok(true);
         }
 
         let len = self.len();
         if len != 0 {
             // The number of descriptor chain heads to process should always
             // be smaller or equal to the queue size.
-            if len > self.actual_size() {
-                // TODO: Remove this before push
-                // We are choosing to interrupt execution since this could be a potential malicious
-                // driver scenario. This way we also eliminate the risk of
-                // repeatedly logging and potentially clogging the microVM through
-                // the log system.
-                // panic!(
-                //     "The number of available virtio descriptors {len} is greater than queue size: \
-                //      {}!",
-                //     self.actual_size()
-                // );
+            if len > self.size {
+                return Err(InvalidAvailIdx {
+                    queue_size: self.size,
+                    reported_len: len,
+                });
             }
-            return false;
+            return Ok(false);
         }
 
         // Set the next expected avail_idx as avail_event.
@@ -682,7 +695,7 @@ impl Queue {
 
         // If the actual avail_idx is different than next_avail one or more descriptors can still
         // be consumed from the available ring.
-        self.next_avail.0 == self.avail_ring_idx_get()
+        Ok(self.next_avail.0 == self.avail_ring_idx_get())
     }
 
     /// Enable notification suppression.
@@ -1067,7 +1080,7 @@ mod verification {
             // done. This is relying on implementation details of add_used, namely that
             // the check for out-of-bounds descriptor index happens at the very beginning of the
             // function.
-            assert!(used_desc_table_index >= queue.actual_size());
+            assert!(used_desc_table_index >= queue.size);
         }
     }
 
@@ -1104,11 +1117,11 @@ mod verification {
 
     #[kani::proof]
     #[kani::unwind(0)]
-    fn verify_actual_size() {
+    fn verify_size() {
         let ProofContext(queue, _) = kani::any();
 
-        assert!(queue.actual_size() <= queue.get_max_size());
-        assert!(queue.actual_size() <= queue.size);
+        assert!(queue.size <= queue.max_size);
+        assert!(queue.size <= queue.size);
     }
 
     #[kani::proof]
@@ -1173,11 +1186,11 @@ mod verification {
         // is called when the queue is being initialized, e.g. empty. We compute it using
         // local variables here to make things easier on kani: One less roundtrip through vm-memory.
         let queue_len = queue.len();
-        kani::assume(queue_len <= queue.actual_size());
+        kani::assume(queue_len <= queue.size);
 
         let next_avail = queue.next_avail;
 
-        if let Some(_) = queue.pop() {
+        if let Some(_) = queue.pop().unwrap() {
             // Can't get anything out of an empty queue, assert queue_len != 0
             assert_ne!(queue_len, 0);
             assert_eq!(queue.next_avail, next_avail + Wrapping(1));
@@ -1191,10 +1204,10 @@ mod verification {
         let ProofContext(mut queue, _) = kani::any();
 
         // See verify_pop for explanation
-        kani::assume(queue.len() <= queue.actual_size());
+        kani::assume(queue.len() <= queue.size);
 
         let queue_clone = queue.clone();
-        if let Some(_) = queue.pop() {
+        if let Some(_) = queue.pop().unwrap() {
             queue.undo_pop();
             assert_eq!(queue, queue_clone);
 
@@ -1207,9 +1220,9 @@ mod verification {
     fn verify_try_enable_notification() {
         let ProofContext(mut queue, _) = ProofContext::bounded_queue();
 
-        kani::assume(queue.len() <= queue.actual_size());
+        kani::assume(queue.len() <= queue.size);
 
-        if queue.try_enable_notification() && queue.uses_notif_suppression {
+        if queue.try_enable_notification().unwrap() && queue.uses_notif_suppression {
             // We only require new notifications if the queue is empty (e.g. we've processed
             // everything we've been notified about), or if suppression is disabled.
             assert!(queue.is_empty());
@@ -1225,10 +1238,9 @@ mod verification {
         let ProofContext(queue, mem) = kani::any();
 
         let index = kani::any();
-        let maybe_chain =
-            DescriptorChain::checked_new(queue.desc_table_ptr, queue.actual_size(), index);
+        let maybe_chain = DescriptorChain::checked_new(queue.desc_table_ptr, queue.size, index);
 
-        if index >= queue.actual_size() {
+        if index >= queue.size {
             assert!(maybe_chain.is_none())
         } else {
             // If the index was in-bounds for the descriptor table, we at least should be
@@ -1243,7 +1255,7 @@ mod verification {
             match maybe_chain {
                 None => {
                     // This assert is the negation of the "is_valid" check in checked_new
-                    assert!(desc.flags & VIRTQ_DESC_F_NEXT == 1 && desc.next >= queue.actual_size())
+                    assert!(desc.flags & VIRTQ_DESC_F_NEXT == 1 && desc.next >= queue.size)
                 }
                 Some(head) => {
                     assert!(head.is_valid())
@@ -1389,7 +1401,7 @@ mod tests {
         assert_eq!(q.len(), 2);
 
         // The first chain should hold exactly two descriptors.
-        let d = q.pop().unwrap().next_descriptor().unwrap();
+        let d = q.pop().unwrap().unwrap().next_descriptor().unwrap();
         assert!(!d.has_next());
         assert!(d.next_descriptor().is_none());
 
@@ -1400,6 +1412,7 @@ mod tests {
         let d = q
             .pop()
             .unwrap()
+            .unwrap()
             .next_descriptor()
             .unwrap()
             .next_descriptor()
@@ -1409,7 +1422,7 @@ mod tests {
 
         // We've popped both chains, so the queue should be empty.
         assert!(q.is_empty());
-        assert!(q.pop().is_none());
+        assert!(q.pop().unwrap().is_none());
 
         // Undoing the last pop should let us walk the last chain again.
         q.undo_pop();
@@ -1418,6 +1431,7 @@ mod tests {
         // Walk the last chain again (three descriptors).
         let d = q
             .pop()
+            .unwrap()
             .unwrap()
             .next_descriptor()
             .unwrap()
@@ -1434,6 +1448,7 @@ mod tests {
         let d = q
             .pop_or_enable_notification()
             .unwrap()
+            .unwrap()
             .next_descriptor()
             .unwrap()
             .next_descriptor()
@@ -1444,20 +1459,17 @@ mod tests {
         // There are no more descriptors, but notification suppression is disabled.
         // Calling pop_or_enable_notification() should simply return None.
         assert_eq!(q.used_ring_avail_event_get(), 0);
-        assert!(q.pop_or_enable_notification().is_none());
+        assert!(q.pop_or_enable_notification().unwrap().is_none());
         assert_eq!(q.used_ring_avail_event_get(), 0);
 
         // There are no more descriptors and notification suppression is enabled. Calling
         // pop_or_enable_notification() should enable notifications.
         q.enable_notif_suppression();
-        assert!(q.pop_or_enable_notification().is_none());
+        assert!(q.pop_or_enable_notification().unwrap().is_none());
         assert_eq!(q.used_ring_avail_event_get(), 2);
     }
 
     #[test]
-    #[should_panic(
-        expected = "The number of available virtio descriptors 5 is greater than queue size: 4!"
-    )]
     fn test_invalid_avail_idx_no_notification() {
         // This test ensures constructing a descriptor chain succeeds
         // with valid available ring indexes while it produces an error with invalid
@@ -1485,7 +1497,7 @@ mod tests {
         assert_eq!(q.len(), 2);
 
         // We process the first descriptor.
-        let d = q.pop().unwrap().next_descriptor();
+        let d = q.pop().unwrap().unwrap().next_descriptor();
         assert!(matches!(d, Some(x) if !x.has_next()));
         // We confuse the device and set the available index as being 6.
         vq.avail.idx.set(6);
@@ -1496,13 +1508,16 @@ mod tests {
         // However, since the apparent length set by the driver is more than the queue size,
         // we would be running the risk of going through some descriptors more than once.
         // As such, we expect to panic.
-        q.pop();
+        assert_eq!(
+            q.pop().unwrap_err(),
+            InvalidAvailIdx {
+                reported_len: 5,
+                queue_size: 4
+            }
+        );
     }
 
     #[test]
-    #[should_panic(
-        expected = "The number of available virtio descriptors 6 is greater than queue size: 4!"
-    )]
     fn test_invalid_avail_idx_with_notification() {
         // This test ensures constructing a descriptor chain succeeds
         // with valid available ring indexes while it produces an error with invalid
@@ -1527,7 +1542,13 @@ mod tests {
         // driver sets available index to suspicious value.
         vq.avail.idx.set(6);
 
-        q.pop_or_enable_notification();
+        assert_eq!(
+            q.pop_or_enable_notification().unwrap_err(),
+            InvalidAvailIdx {
+                queue_size: 4,
+                reported_len: 6
+            }
+        );
     }
 
     #[test]
@@ -1548,6 +1569,7 @@ mod tests {
 
             // should be ok
             q.add_used(1, 0x1000).unwrap();
+            q.advance_used_ring_idx();
             assert_eq!(vq.used.idx.get(), 1);
             let x = vq.used.ring[0].get();
             assert_eq!(x.id, 1);
@@ -1649,18 +1671,18 @@ mod tests {
         assert_eq!(q.len(), 1);
 
         // Notification suppression is disabled. try_enable_notification shouldn't do anything.
-        assert!(q.try_enable_notification());
+        assert!(q.try_enable_notification().unwrap());
         assert_eq!(q.used_ring_avail_event_get(), 0);
 
         // Enable notification suppression and check again. There is 1 available descriptor chain.
         // Again nothing should happen.
         q.enable_notif_suppression();
-        assert!(!q.try_enable_notification());
+        assert!(!q.try_enable_notification().unwrap());
         assert_eq!(q.used_ring_avail_event_get(), 0);
 
         // Consume the descriptor. avail_event should be modified
-        assert!(q.pop().is_some());
-        assert!(q.try_enable_notification());
+        assert!(q.pop().unwrap().is_some());
+        assert!(q.try_enable_notification().unwrap());
         assert_eq!(q.used_ring_avail_event_get(), 1);
     }
 
