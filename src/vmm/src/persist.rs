@@ -34,7 +34,9 @@ use crate::utils::u64_to_usize;
 use crate::vmm_config::boot_source::BootSourceConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::machine_config::{HugePageConfig, MachineConfigError, MachineConfigUpdate};
-use crate::vmm_config::snapshot::{CreateSnapshotParams, LoadSnapshotParams, MemBackendType};
+use crate::vmm_config::snapshot::{
+    CreateSnapshotParams, LoadSnapshotParams, MemBackendType, SnapshotType,
+};
 use crate::vstate::kvm::KvmState;
 use crate::vstate::memory;
 use crate::vstate::memory::{GuestMemoryState, GuestRegionMmap, MemoryError};
@@ -137,6 +139,8 @@ pub enum CreateSnapshotError {
     DirtyBitmap(#[from] VmError),
     /// Cannot write memory file: {0}
     Memory(#[from] MemoryError),
+    /// Cannot msync memory file: {0}
+    MemoryMsync(MemoryError),
     /// Cannot perform {0} on the memory backing file: {1}
     MemoryBackingFile(&'static str, io::Error),
     /// Cannot save the microVM state: {0}
@@ -156,11 +160,16 @@ pub fn create_snapshot(
     vm_info: &VmInfo,
     params: &CreateSnapshotParams,
 ) -> Result<(), CreateSnapshotError> {
-    let microvm_state = vmm
-        .save_state(vm_info)
-        .map_err(CreateSnapshotError::MicrovmState)?;
+    match params.snapshot_type {
+        SnapshotType::Diff | SnapshotType::Full | SnapshotType::MsyncAndState => {
+            let microvm_state = vmm
+                .save_state(vm_info)
+                .map_err(CreateSnapshotError::MicrovmState)?;
 
-    snapshot_state_to_file(&microvm_state, &params.snapshot_path)?;
+            snapshot_state_to_file(&microvm_state, &params.snapshot_path)?;
+        }
+        SnapshotType::Msync => (),
+    }
 
     vmm.vm
         .snapshot_memory_to_file(&params.mem_file_path, params.snapshot_type)?;
@@ -384,8 +393,13 @@ pub fn restore_from_snapshot(
                 .into());
             }
             (
-                guest_memory_from_file(mem_backend_path, mem_state, track_dirty_pages)
-                    .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
+                guest_memory_from_file(
+                    mem_backend_path,
+                    mem_state,
+                    track_dirty_pages,
+                    params.shared,
+                )
+                .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
                 None,
             )
         }
@@ -415,7 +429,7 @@ pub enum SnapshotStateFromFileError {
     /// Failed to open snapshot file: {0}
     Open(std::io::Error),
     /// Failed to read snapshot file metadata: {0}
-    Meta(std::io::Error),
+    Meta(crate::snapshot::SnapshotError),
     /// Failed to load snapshot state from file: {0}
     Load(#[from] crate::snapshot::SnapshotError),
     /// Unknown Network Device.
@@ -428,8 +442,9 @@ fn snapshot_state_from_file(
     let snapshot = Snapshot::new(SNAPSHOT_VERSION);
     let mut snapshot_reader =
         File::open(snapshot_path).map_err(SnapshotStateFromFileError::Open)?;
-    let metadata = std::fs::metadata(snapshot_path).map_err(SnapshotStateFromFileError::Meta)?;
-    let snapshot_len = u64_to_usize(metadata.len());
+    let raw_snapshot_len: u64 =
+        Snapshot::deserialize(&mut snapshot_reader).map_err(SnapshotStateFromFileError::Meta)?;
+    let snapshot_len = u64_to_usize(raw_snapshot_len);
     let state: MicrovmState = snapshot
         .load_with_version_check(&mut snapshot_reader, snapshot_len)
         .map_err(SnapshotStateFromFileError::Load)?;
@@ -451,9 +466,19 @@ fn guest_memory_from_file(
     mem_file_path: &Path,
     mem_state: &GuestMemoryState,
     track_dirty_pages: bool,
+    shared: bool,
 ) -> Result<Vec<GuestRegionMmap>, GuestMemoryFromFileError> {
-    let mem_file = File::open(mem_file_path)?;
-    let guest_mem = memory::snapshot_file(mem_file, mem_state.regions(), track_dirty_pages)?;
+    let mem_file = if shared {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(mem_file_path)?
+    } else {
+        File::open(mem_file_path)?
+    };
+
+    let guest_mem =
+        memory::snapshot_file(mem_file, mem_state.regions(), track_dirty_pages, shared)?;
     Ok(guest_mem)
 }
 

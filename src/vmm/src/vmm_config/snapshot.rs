@@ -18,6 +18,10 @@ pub enum SnapshotType {
     /// Full snapshot.
     #[default]
     Full,
+    /// Memory synchronization snapshot.
+    Msync,
+    /// Memory synchronization and state snapshot.
+    MsyncAndState,
 }
 
 /// Specifies the method through which guest memory will get populated when
@@ -72,6 +76,10 @@ pub struct LoadSnapshotParams {
     pub resume_vm: bool,
     /// The network devices to override on load.
     pub network_overrides: Vec<NetworkOverride>,
+    /// When set to true and the guest memory backend is a file,
+    /// changes to the memory are asynchronously written back to the
+    /// backend as the VM is running.
+    pub shared: bool,
 }
 
 /// Stores the configuration for loading a snapshot that is provided by the user.
@@ -101,6 +109,9 @@ pub struct LoadSnapshotConfig {
     /// The network devices to override on load.
     #[serde(default)]
     pub network_overrides: Vec<NetworkOverride>,
+    /// Whether or not to asynchronously write back memory changes to the backing file.
+    #[serde(default)]
+    pub shared: bool,
 }
 
 /// Stores the configuration used for managing snapshot memory.
