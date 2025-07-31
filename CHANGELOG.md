@@ -16,14 +16,47 @@ and this project adheres to
 - [#5175](https://github.com/firecracker-microvm/firecracker/pull/5175): Allow
   including a custom cpu template directly in the json configuration file passed
   to `--config-file` under the `cpu_config` key.
+- [#5274](https://github.com/firecracker-microvm/firecracker/pull/5274): Allow
+  taking diff snapshots even if dirty page tracking is disabled, by using
+  `mincore(2)` to overapproximate the set of dirty pages. Only works if swap is
+  disabled.
+- [#5290](https://github.com/firecracker-microvm/firecracker/pull/5290):
+  Extended MMDS to support the EC2 IMDS-compatible session token headers (i.e.
+  "X-aws-ec2-metadata-token" and "X-aws-ec2-metadata-token-ttl-seconds")
+  alongside the MMDS-specific ones.
+- [#5290](https://github.com/firecracker-microvm/firecracker/pull/5290): Added
+  `mmds.rx_invalid_token` and `mmds.rx_no_token` metrics to track the number of
+  GET requests that were rejected due to token validation failures in MMDS
+  version 2. These metrics also count requests that would be rejected in MMDS
+  version 2 when MMDS version 1 is configured. They helps users assess readiness
+  for migrating to MMDS version 2.
+- [#5310](https://github.com/firecracker-microvm/firecracker/pull/5310): Added
+  an optional `imds_compat` field (default to false if not provided) to PUT
+  requests to `/mmds/config` to enforce MMDS to always respond plain text
+  contents in the IMDS format regardless of the `Accept` header in requests.
+  Users need to regenerate snapshots.
 
 ### Changed
 
 - [#5165](https://github.com/firecracker-microvm/firecracker/pull/5165): Changed
   Firecracker snapshot feature from developer preview to generally available.
   Incremental snapshots remain in developer preview.
+- [#5282](https://github.com/firecracker-microvm/firecracker/pull/5282): Updated
+  jailer to no longer require the executable file name to contain `firecracker`.
+- [#5290](https://github.com/firecracker-microvm/firecracker/pull/5290): Changed
+  MMDS to validate the value of "X-metadata-token-ttl-seconds" header only if it
+  is a PUT request to /latest/api/token, as in EC2 IMDS.
+- [#5290](https://github.com/firecracker-microvm/firecracker/pull/5290): Changed
+  MMDS version 1 to support the session oriented method as in version 2,
+  allowing easier migration to version 2. Note that MMDS version 1 accepts a GET
+  request even with no token or an invalid token so that existing workloads
+  continue to work.
 
 ### Deprecated
+
+- [#5274](https://github.com/firecracker-microvm/firecracker/pull/5274):
+  Deprecated the `enable_diff_snapshots` parameter of the `/snapshot/load` API.
+  Use `track_dirty_pages` instead.
 
 ### Removed
 
@@ -38,6 +71,16 @@ and this project adheres to
 - [#5260](https://github.com/firecracker-microvm/firecracker/pull/5260): Fixed a
   bug allowing the block device to starve all other devices when backed by a
   sufficiently slow drive.
+- [#4207](https://github.com/firecracker-microvm/firecracker/issues/4207): Fixed
+  GSI numbering on aarch64 to correctly allow up to 96 devices being attached
+  simultaneously.
+- [#5290](https://github.com/firecracker-microvm/firecracker/pull/5290): Fixed
+  MMDS to reject PUT requests containing `X-Forwarded-For` header regardless of
+  its casing (e.g. `x-forwarded-for`).
+- [#5328](https://github.com/firecracker-microvm/firecracker/pull/5328): Fixed
+  MMDS to set the token TTL header (i.e. "X-metadata-token-ttl-seconds" or
+  "X-aws-ec2-metadata-token-ttl-seconds") in the response to "PUT
+  /latest/api/token", as EC2 IMDS does.
 
 ## [1.12.0]
 
@@ -158,13 +201,6 @@ and this project adheres to
 - [#5052](https://github.com/firecracker-microvm/firecracker/pull/5052): Build
   the empty seccomp policy as default for debug builds to avoid crashes on
   syscalls introduced by debug assertions from Rust 1.80.0.
-
-## [1.10.1]
-
-### Changed
-
-- [#4907](https://github.com/firecracker-microvm/firecracker/pull/4907): Bumped
-  the snapshot version to 4.0.0, so users need to regenerate snapshots.
 
 ## [1.10.0]
 

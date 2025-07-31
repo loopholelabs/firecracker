@@ -197,14 +197,14 @@ pub enum VmmData {
 /// The methods get a mutable reference to self because the methods should initialise the data
 /// store with the defaults if it's not already initialised.
 trait MmdsRequestHandler {
-    fn mmds(&mut self) -> MutexGuard<'_, Mmds>;
+    fn mmds(&mut self) -> Result<MutexGuard<'_, Mmds>, VmmActionError>;
 
     fn get_mmds(&mut self) -> Result<VmmData, VmmActionError> {
-        Ok(VmmData::MmdsValue(self.mmds().data_store_value()))
+        Ok(VmmData::MmdsValue(self.mmds()?.data_store_value()))
     }
 
     fn patch_mmds(&mut self, value: serde_json::Value) -> Result<VmmData, VmmActionError> {
-        self.mmds()
+        self.mmds()?
             .patch_data(value)
             .map(|()| VmmData::Empty)
             .map_err(|err| match err {
@@ -218,7 +218,7 @@ trait MmdsRequestHandler {
     }
 
     fn put_mmds(&mut self, value: serde_json::Value) -> Result<VmmData, VmmActionError> {
-        self.mmds()
+        self.mmds()?
             .put_data(value)
             .map(|()| VmmData::Empty)
             .map_err(|err| match err {
@@ -264,8 +264,10 @@ impl fmt::Debug for PrebootApiController<'_> {
 }
 
 impl MmdsRequestHandler for PrebootApiController<'_> {
-    fn mmds(&mut self) -> MutexGuard<'_, Mmds> {
-        self.vm_resources.locked_mmds_or_default()
+    fn mmds(&mut self) -> Result<MutexGuard<'_, Mmds>, VmmActionError> {
+        self.vm_resources
+            .locked_mmds_or_default()
+            .map_err(VmmActionError::MmdsConfig)
     }
 }
 
@@ -286,10 +288,12 @@ pub type ApiRequest = Box<VmmAction>;
 pub type ApiResponse = Box<std::result::Result<VmmData, VmmActionError>>;
 
 /// Error type for `PrebootApiController::build_microvm_from_requests`.
-#[derive(Debug, thiserror::Error, displaydoc::Display, derive_more::From)]
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum BuildMicrovmFromRequestsError {
+    /// Configuring MMDS failed: {0}.
+    ConfigureMmds(#[from] MmdsConfigError),
     /// Populating MMDS from file failed: {0}.
-    Mmds(data_store::MmdsDatastoreError),
+    PopulateMmds(#[from] data_store::MmdsDatastoreError),
     /// Loading snapshot failed.
     Restore,
     /// Resuming MicroVM after loading snapshot failed.
@@ -342,7 +346,7 @@ impl<'a> PrebootApiController<'a> {
 
         // Init the data store from file, if present.
         if let Some(data) = metadata_json {
-            vm_resources.locked_mmds_or_default().put_data(
+            vm_resources.locked_mmds_or_default()?.put_data(
                 serde_json::from_str(data).expect("MMDS error: metadata provided not valid json"),
             )?;
 
@@ -607,8 +611,10 @@ pub struct RuntimeApiController {
 }
 
 impl MmdsRequestHandler for RuntimeApiController {
-    fn mmds(&mut self) -> MutexGuard<'_, Mmds> {
-        self.vm_resources.locked_mmds_or_default()
+    fn mmds(&mut self) -> Result<MutexGuard<'_, Mmds>, VmmActionError> {
+        self.vm_resources
+            .locked_mmds_or_default()
+            .map_err(VmmActionError::MmdsConfig)
     }
 }
 
@@ -747,13 +753,6 @@ impl RuntimeApiController {
     ) -> Result<VmmData, VmmActionError> {
         if create_params.snapshot_type == SnapshotType::Diff {
             log_dev_preview_warning("Virtual machine diff snapshots", None);
-
-            if !self.vm_resources.machine_config.track_dirty_pages {
-                return Err(VmmActionError::NotSupported(
-                    "Diff snapshots are not allowed on uVMs with dirty page tracking disabled."
-                        .to_string(),
-                ));
-            }
         }
 
         let mut locked_vmm = self.vmm.lock().unwrap();
@@ -1264,6 +1263,7 @@ mod tests {
                 ipv4_address: None,
                 version: MmdsVersion::default(),
                 network_interfaces: Vec::new(),
+                imds_compat: false,
             },
         )));
         check_unsupported(runtime_request(VmmAction::UpdateMachineConfiguration(
@@ -1276,7 +1276,7 @@ mod tests {
                     backend_type: MemBackendType::File,
                     backend_path: PathBuf::new(),
                 },
-                enable_diff_snapshots: false,
+                track_dirty_pages: false,
                 resume_vm: false,
                 network_overrides: vec![],
             },
