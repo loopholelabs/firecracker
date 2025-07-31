@@ -77,7 +77,12 @@ def pytest_addoption(parser):
 
 def pytest_report_header():
     """Pytest hook to print relevant metadata in the logs"""
-    return f"EC2 AMI: {global_props.ami}"
+    return "\n".join(
+        [
+            f"EC2 AMI: {global_props.ami}",
+            f"EC2 Instance ID: {global_props.instance_id}",
+        ]
+    )
 
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
@@ -269,6 +274,17 @@ def msr_reader_bin(test_fc_session_root_path):
     yield msr_reader_bin_path
 
 
+@pytest.fixture(scope="session")
+def jailer_time_bin(test_fc_session_root_path):
+    """Build a binary that fakes fc"""
+    jailer_time_bin_path = os.path.join(test_fc_session_root_path, "jailer_time")
+    build_tools.gcc_compile(
+        "host_tools/jailer_time.c",
+        jailer_time_bin_path,
+    )
+    yield jailer_time_bin_path
+
+
 @pytest.fixture
 def bin_seccomp_paths():
     """Build jailers and jailed binaries to test seccomp.
@@ -411,7 +427,9 @@ def io_engine(request):
     return request.param
 
 
-@pytest.fixture(params=[SnapshotType.DIFF, SnapshotType.FULL])
+@pytest.fixture(
+    params=[SnapshotType.DIFF, SnapshotType.DIFF_MINCORE, SnapshotType.FULL]
+)
 def snapshot_type(request):
     """All possible snapshot types"""
     return request.param

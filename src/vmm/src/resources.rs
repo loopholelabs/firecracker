@@ -177,7 +177,7 @@ impl VmResources {
 
         // Init the data store from file, if present.
         if let Some(data) = metadata_json {
-            resources.locked_mmds_or_default().put_data(
+            resources.locked_mmds_or_default()?.put_data(
                 serde_json::from_str(data).expect("MMDS error: metadata provided not valid json"),
             )?;
             info!("Successfully added metadata to mmds from file");
@@ -195,17 +195,16 @@ impl VmResources {
     }
 
     /// If not initialised, create the mmds data store with the default config.
-    pub fn mmds_or_default(&mut self) -> &Arc<Mutex<Mmds>> {
-        self.mmds
-            .get_or_insert(Arc::new(Mutex::new(Mmds::default_with_limit(
-                self.mmds_size_limit,
-            ))))
+    pub fn mmds_or_default(&mut self) -> Result<&Arc<Mutex<Mmds>>, MmdsConfigError> {
+        Ok(self
+            .mmds
+            .get_or_insert(Arc::new(Mutex::new(Mmds::try_new(self.mmds_size_limit)?))))
     }
 
     /// If not initialised, create the mmds data store with the default config.
-    pub fn locked_mmds_or_default(&mut self) -> MutexGuard<'_, Mmds> {
-        let mmds = self.mmds_or_default();
-        mmds.lock().expect("Poisoned lock")
+    pub fn locked_mmds_or_default(&mut self) -> Result<MutexGuard<'_, Mmds>, MmdsConfigError> {
+        let mmds = self.mmds_or_default()?;
+        Ok(mmds.lock().expect("Poisoned lock"))
     }
 
     /// Updates the resources from a restored device (used for configuring resources when
@@ -291,10 +290,12 @@ impl VmResources {
             .collect();
 
         if !net_devs_with_mmds.is_empty() {
+            let mmds_guard = mmds.lock().expect("Poisoned lock");
             let mut inner_mmds_config = MmdsConfig {
-                version: mmds.lock().expect("Poisoned lock").version(),
+                version: mmds_guard.version(),
                 network_interfaces: vec![],
                 ipv4_address: None,
+                imds_compat: mmds_guard.imds_compat(),
             };
 
             for net_dev in net_devs_with_mmds {
@@ -384,21 +385,21 @@ impl VmResources {
         instance_id: &str,
     ) -> Result<(), MmdsConfigError> {
         self.set_mmds_network_stack_config(&config)?;
-        self.set_mmds_version(config.version, instance_id)?;
+        self.set_mmds_basic_config(config.version, config.imds_compat, instance_id)?;
 
         Ok(())
     }
 
-    /// Updates MMDS version.
-    pub fn set_mmds_version(
+    /// Updates MMDS-related config other than MMDS network stack.
+    pub fn set_mmds_basic_config(
         &mut self,
         version: MmdsVersion,
+        imds_compat: bool,
         instance_id: &str,
     ) -> Result<(), MmdsConfigError> {
-        let mut mmds_guard = self.locked_mmds_or_default();
-        mmds_guard
-            .set_version(version)
-            .map_err(|err| MmdsConfigError::MmdsVersion(version, err))?;
+        let mut mmds_guard = self.locked_mmds_or_default()?;
+        mmds_guard.set_version(version);
+        mmds_guard.set_imds_compat(imds_compat);
         mmds_guard.set_aad(instance_id);
 
         Ok(())
@@ -434,7 +435,7 @@ impl VmResources {
         }
 
         // Safe to unwrap because we've just made sure that it's initialised.
-        let mmds = self.mmds_or_default().clone();
+        let mmds = self.mmds_or_default()?.clone();
 
         // Create `MmdsNetworkStack` and configure the IPv4 address for
         // existing built network devices whose names are defined in the

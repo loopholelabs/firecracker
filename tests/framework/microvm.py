@@ -22,12 +22,12 @@ import time
 import uuid
 from collections import namedtuple
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import Retrying, retry, stop_after_attempt, wait_fixed
 
 import host_tools.cargo_build as build_tools
 import host_tools.network as net_tools
@@ -49,12 +49,32 @@ LOG = logging.getLogger("microvm")
 class SnapshotType(Enum):
     """Supported snapshot types."""
 
-    FULL = "Full"
-    DIFF = "Diff"
+    FULL = auto()
+    DIFF = auto()
+    DIFF_MINCORE = auto()
 
     def __repr__(self):
         cls_name = self.__class__.__name__
         return f"{cls_name}.{self.name}"
+
+    @property
+    def needs_rebase(self) -> bool:
+        """Does this snapshot type need rebasing on top of a base snapshot before restoration?"""
+        return self in [SnapshotType.DIFF, SnapshotType.DIFF_MINCORE]
+
+    @property
+    def needs_dirty_page_tracking(self) -> bool:
+        """Does taking this snapshot type require dirty page tracking to be enabled?"""
+        return self == SnapshotType.DIFF
+
+    @property
+    def api_type(self) -> str:
+        """Converts this `SnapshotType` to the string value expected by the Firecracker API"""
+        match self:
+            case SnapshotType.FULL:
+                return "Full"
+            case SnapshotType.DIFF | SnapshotType.DIFF_MINCORE:
+                return "Diff"
 
 
 def hardlink_or_copy(src, dst):
@@ -79,15 +99,10 @@ class Snapshot:
     snapshot_type: SnapshotType
     meta: dict
 
-    @property
-    def is_diff(self) -> bool:
-        """Is this a DIFF snapshot?"""
-        return self.snapshot_type == SnapshotType.DIFF
-
     def rebase_snapshot(self, base, use_snapshot_editor=False):
         """Rebases current incremental snapshot onto a specified base layer."""
-        if not self.is_diff:
-            raise ValueError("Can only rebase DIFF snapshots")
+        if not self.snapshot_type.needs_rebase:
+            raise ValueError(f"Cannot rebase {self.snapshot_type}")
         if use_snapshot_editor:
             build_tools.run_snap_editor_rebase(base.mem, self.mem)
         else:
@@ -466,8 +481,16 @@ class Microvm:
         """
         if not self._spawned:
             return None
-        # Read the PID stored inside the file.
-        return int(self.jailer.pid_file.read_text(encoding="ascii"))
+
+        # Read the PID from Firecracker's pidfile. Retry if
+        # file doesn't exist yet, or doesn't yet contain an integer
+        for attempt in Retrying(
+            stop=stop_after_attempt(5),
+            wait=wait_fixed(0.1),
+            reraise=True,
+        ):
+            with attempt:
+                return int(self.jailer.pid_file.read_text(encoding="ascii"))
 
     @property
     def dimensions(self):
@@ -962,7 +985,7 @@ class Microvm:
 
     def make_snapshot(
         self,
-        snapshot_type: SnapshotType | str,
+        snapshot_type: SnapshotType,
         *,
         mem_path: str = "mem",
         vmstate_path="vmstate",
@@ -974,12 +997,11 @@ class Microvm:
 
         It pauses the microvm before taking the snapshot.
         """
-        snapshot_type = SnapshotType(snapshot_type)
         self.pause()
         self.api.snapshot_create.put(
             mem_file_path=str(mem_path),
             snapshot_path=str(vmstate_path),
-            snapshot_type=snapshot_type.value,
+            snapshot_type=snapshot_type.api_type,
         )
         root = Path(self.chroot())
         return Snapshot(
@@ -997,11 +1019,15 @@ class Microvm:
 
     def snapshot_diff(self, *, mem_path: str = "mem", vmstate_path="vmstate"):
         """Make a Diff snapshot"""
-        return self.make_snapshot("Diff", mem_path=mem_path, vmstate_path=vmstate_path)
+        return self.make_snapshot(
+            SnapshotType.DIFF, mem_path=mem_path, vmstate_path=vmstate_path
+        )
 
     def snapshot_full(self, *, mem_path: str = "mem", vmstate_path="vmstate"):
         """Make a Full snapshot"""
-        return self.make_snapshot("Full", mem_path=mem_path, vmstate_path=vmstate_path)
+        return self.make_snapshot(
+            SnapshotType.FULL, mem_path=mem_path, vmstate_path=vmstate_path
+        )
 
     def restore_from_snapshot(
         self,
@@ -1067,7 +1093,7 @@ class Microvm:
         self.api.snapshot_load.put(
             mem_backend=mem_backend,
             snapshot_path=str(jailed_vmstate),
-            enable_diff_snapshots=jailed_snapshot.is_diff,
+            enable_diff_snapshots=jailed_snapshot.snapshot_type.needs_dirty_page_tracking,
             resume_vm=resume,
             **optional_kwargs,
         )
@@ -1206,13 +1232,20 @@ class MicroVMFactory:
         uffd_handler_name=None,
         incremental=False,
         use_snapshot_editor=True,
+        no_netns_reuse=False,
     ):
         """A generator of `n` microvms restored, either all restored from the same given snapshot
         (incremental=False), or created by taking successive snapshots of restored VMs
         """
         last_snapshot = None
         for _ in range(nr_vms):
-            microvm = self.build()
+            microvm = self.build(
+                **(
+                    {"netns": net_tools.NetNs(str(uuid.uuid4()))}
+                    if no_netns_reuse
+                    else {}
+                )
+            )
             microvm.spawn()
 
             snapshot_copy = microvm.restore_from_snapshot(
@@ -1224,12 +1257,15 @@ class MicroVMFactory:
             if incremental:
                 # When doing diff snapshots, we continuously overwrite the same base snapshot file from the first
                 # iteration in-place with successive snapshots, so don't delete it!
-                if last_snapshot is not None and not last_snapshot.is_diff:
+                if (
+                    last_snapshot is not None
+                    and not last_snapshot.snapshot_type.needs_rebase
+                ):
                     last_snapshot.delete()
 
                 next_snapshot = microvm.make_snapshot(current_snapshot.snapshot_type)
 
-                if current_snapshot.is_diff:
+                if current_snapshot.snapshot_type.needs_rebase:
                     next_snapshot = next_snapshot.rebase_snapshot(
                         current_snapshot, use_snapshot_editor
                     )
@@ -1240,7 +1276,7 @@ class MicroVMFactory:
             microvm.kill()
             snapshot_copy.delete()
 
-        if last_snapshot is not None and not last_snapshot.is_diff:
+        if last_snapshot is not None and not last_snapshot.snapshot_type.needs_rebase:
             last_snapshot.delete()
         current_snapshot.delete()
 

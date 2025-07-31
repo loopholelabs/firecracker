@@ -41,7 +41,7 @@ use crate::vstate::kvm::KvmState;
 use crate::vstate::memory;
 use crate::vstate::memory::{GuestMemoryState, GuestRegionMmap, MemoryError};
 use crate::vstate::vcpu::{VcpuSendEventError, VcpuState};
-use crate::vstate::vm::VmState;
+use crate::vstate::vm::{VmError, VmState};
 use crate::{EventManager, Vmm, vstate};
 
 /// Holds information related to the VM that is not part of VmState.
@@ -136,7 +136,7 @@ pub enum MicrovmStateError {
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum CreateSnapshotError {
     /// Cannot get dirty bitmap: {0}
-    DirtyBitmap(#[from] vmm_sys_util::errno::Error),
+    DirtyBitmap(#[from] VmError),
     /// Cannot write memory file: {0}
     Memory(#[from] MemoryError),
     /// Cannot msync memory file: {0}
@@ -152,7 +152,7 @@ pub enum CreateSnapshotError {
 }
 
 /// Snapshot version
-pub const SNAPSHOT_VERSION: Version = Version::new(7, 0, 0);
+pub const SNAPSHOT_VERSION: Version = Version::new(8, 0, 0);
 
 /// Creates a Microvm snapshot.
 pub fn create_snapshot(
@@ -175,14 +175,14 @@ pub fn create_snapshot(
         .snapshot_memory_to_file(&params.mem_file_path, params.snapshot_type)?;
 
     // We need to mark queues as dirty again for all activated devices. The reason we
-    // do it here is because we don't mark pages as dirty during runtime
+    // do it here is that we don't mark pages as dirty during runtime
     // for queue objects.
     // SAFETY:
     // This should never fail as we only mark pages only if device has already been activated,
     // and the address validation was already performed on device activation.
     vmm.mmio_device_manager
         .for_each_virtio_device(|_, _, _, dev| {
-            let d = dev.lock().unwrap();
+            let mut d = dev.lock().unwrap();
             if d.is_activated() {
                 d.mark_queue_memory_dirty(vmm.vm.guest_memory())
             } else {
@@ -264,22 +264,22 @@ pub fn validate_cpu_manufacturer_id(microvm_state: &MicrovmState) {
     let host_cpu_id = get_manufacturer_id_from_host();
     let snapshot_cpu_id = microvm_state.vcpu_states[0].regs.manifacturer_id();
     match (host_cpu_id, snapshot_cpu_id) {
-        (Ok(host_id), Some(snapshot_id)) => {
+        (Some(host_id), Some(snapshot_id)) => {
             info!("Host CPU manufacturer ID: {host_id:?}");
             info!("Snapshot CPU manufacturer ID: {snapshot_id:?}");
             if host_id != snapshot_id {
                 warn!("Host CPU manufacturer ID differs from the snapshotted one",);
             }
         }
-        (Ok(host_id), None) => {
+        (Some(host_id), None) => {
             info!("Host CPU manufacturer ID: {host_id:?}");
             warn!("Snapshot CPU manufacturer ID: couldn't get from the snapshot");
         }
-        (Err(_), Some(snapshot_id)) => {
+        (None, Some(snapshot_id)) => {
             warn!("Host CPU manufacturer ID: couldn't get from the host");
             info!("Snapshot CPU manufacturer ID: {snapshot_id:?}");
         }
-        (Err(_), None) => {
+        (None, None) => {
             warn!("Host CPU manufacturer ID: couldn't get from the host");
             warn!("Snapshot CPU manufacturer ID: couldn't get from the snapshot");
         }
@@ -356,7 +356,7 @@ pub fn restore_from_snapshot(
             return Err(SnapshotStateFromFileError::UnknownNetworkDevice.into());
         }
     }
-    let track_dirty_pages = params.enable_diff_snapshots;
+    let track_dirty_pages = params.track_dirty_pages;
 
     let vcpu_count = microvm_state
         .vcpu_states

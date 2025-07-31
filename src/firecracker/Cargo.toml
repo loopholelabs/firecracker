@@ -22,12 +22,12 @@ gdb = ["vmm/gdb"]
 [dependencies]
 displaydoc = "0.2.5"
 event-manager = "0.4.1"
-libc = "0.2.173"
+libc = "0.2.174"
 log-instrument = { path = "../log-instrument", optional = true }
 micro_http = { git = "https://github.com/firecracker-microvm/micro-http" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_derive = "1.0.136"
-serde_json = "1.0.140"
+serde_json = "1.0.141"
 thiserror = "2.0.12"
 timerfd = "1.6.0"
 utils = { path = "../utils" }
@@ -37,11 +37,11 @@ vmm-sys-util = { version = "0.14.0", features = ["with-serde"] }
 [build-dependencies]
 seccompiler = { path = "../seccompiler" }
 serde = { version = "1.0.219" }
-serde_json = "1.0.140"
+serde_json = "1.0.141"
 
 [dev-dependencies]
-cargo_toml = "0.22.1"
-libc = "0.2.173"
+cargo_toml = "0.22.3"
+libc = "0.2.174"
 regex = { version = "1.11.1", default-features = false, features = ["std", "unicode-perl"] }
 
 # Dev-Dependencies for uffd examples
