@@ -1,7 +1,6 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt;
 use std::time::Duration;
 
 use log::error;
@@ -26,6 +25,7 @@ use super::{
 use crate::devices::virtio::balloon::BalloonError;
 use crate::devices::virtio::device::{IrqTrigger, IrqType};
 use crate::devices::virtio::generated::virtio_config::VIRTIO_F_VERSION_1;
+use crate::devices::virtio::queue::InvalidAvailIdx;
 use crate::logger::IncMetric;
 use crate::utils::u64_to_usize;
 use crate::vstate::memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryMmap};
@@ -150,6 +150,7 @@ impl BalloonStats {
 }
 
 /// Virtio balloon device.
+#[derive(Debug)]
 pub struct Balloon {
     // Virtio fields.
     pub(crate) avail_features: u64,
@@ -173,29 +174,6 @@ pub struct Balloon {
     pub(crate) latest_stats: BalloonStats,
     // A buffer used as pfn accumulator during descriptor processing.
     pub(crate) pfn_buffer: [u32; MAX_PAGE_COMPACT_BUFFER],
-}
-
-// TODO Use `#[derive(Debug)]` when a new release of
-// [rust-timerfd](https://github.com/main--/rust-timerfd) is published that includes
-// https://github.com/main--/rust-timerfd/pull/12.
-impl fmt::Debug for Balloon {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Balloon")
-            .field("avail_features", &self.avail_features)
-            .field("acked_features", &self.acked_features)
-            .field("config_space", &self.config_space)
-            .field("activate_evt", &self.activate_evt)
-            .field("queues", &self.queues)
-            .field("queue_evts", &self.queue_evts)
-            .field("device_state", &self.device_state)
-            .field("irq_trigger", &self.irq_trigger)
-            .field("restored_from_file", &self.restored_from_file)
-            .field("stats_polling_interval_s", &self.stats_polling_interval_s)
-            .field("stats_desc_index", &self.stats_desc_index)
-            .field("latest_stats", &self.latest_stats)
-            .field("pfn_buffer", &self.pfn_buffer)
-            .finish()
-    }
 }
 
 impl Balloon {
@@ -297,7 +275,7 @@ impl Balloon {
             // Internal loop processes descriptors and acummulates the pfns in `pfn_buffer`.
             // Breaks out when there is not enough space in `pfn_buffer` to completely process
             // the next descriptor.
-            while let Some(head) = queue.pop() {
+            while let Some(head) = queue.pop()? {
                 let len = head.len as usize;
                 let max_len = MAX_PAGES_IN_DESC * SIZE_OF_U32;
                 valid_descs_found = true;
@@ -339,7 +317,7 @@ impl Balloon {
 
                 // Acknowledge the receipt of the descriptor.
                 // 0 is number of bytes the device has written to memory.
-                queue.add_used(head.index, 0).map_err(BalloonError::Queue)?;
+                queue.add_used(head.index, 0)?;
                 needs_interrupt = true;
             }
 
@@ -361,6 +339,7 @@ impl Balloon {
                 }
             }
         }
+        queue.advance_used_ring_idx();
 
         if needs_interrupt {
             self.signal_used_queue()?;
@@ -375,10 +354,11 @@ impl Balloon {
         let queue = &mut self.queues[DEFLATE_INDEX];
         let mut needs_interrupt = false;
 
-        while let Some(head) = queue.pop() {
-            queue.add_used(head.index, 0).map_err(BalloonError::Queue)?;
+        while let Some(head) = queue.pop()? {
+            queue.add_used(head.index, 0)?;
             needs_interrupt = true;
         }
+        queue.advance_used_ring_idx();
 
         if needs_interrupt {
             self.signal_used_queue()
@@ -392,14 +372,12 @@ impl Balloon {
         let mem = self.device_state.mem().unwrap();
         METRICS.stats_updates_count.inc();
 
-        while let Some(head) = self.queues[STATS_INDEX].pop() {
+        while let Some(head) = self.queues[STATS_INDEX].pop()? {
             if let Some(prev_stats_desc) = self.stats_desc_index {
                 // We shouldn't ever have an extra buffer if the driver follows
                 // the protocol, but return it if we find one.
                 error!("balloon: driver is not compliant, more than one stats buffer received");
-                self.queues[STATS_INDEX]
-                    .add_used(prev_stats_desc, 0)
-                    .map_err(BalloonError::Queue)?;
+                self.queues[STATS_INDEX].add_used(prev_stats_desc, 0)?;
             }
             for index in (0..head.len).step_by(SIZE_OF_STAT) {
                 // Read the address at position `index`. The only case
@@ -433,9 +411,15 @@ impl Balloon {
     }
 
     /// Process device virtio queue(s).
-    pub fn process_virtio_queues(&mut self) {
-        let _ = self.process_inflate();
-        let _ = self.process_deflate_queue();
+    pub fn process_virtio_queues(&mut self) -> Result<(), InvalidAvailIdx> {
+        if let Err(BalloonError::InvalidAvailIdx(err)) = self.process_inflate() {
+            return Err(err);
+        }
+        if let Err(BalloonError::InvalidAvailIdx(err)) = self.process_deflate_queue() {
+            return Err(err);
+        }
+
+        Ok(())
     }
 
     /// Provides the ID of this balloon device.
@@ -447,9 +431,8 @@ impl Balloon {
         // The communication is driven by the device by using the buffer
         // and sending a used buffer notification
         if let Some(index) = self.stats_desc_index.take() {
-            self.queues[STATS_INDEX]
-                .add_used(index, 0)
-                .map_err(BalloonError::Queue)?;
+            self.queues[STATS_INDEX].add_used(index, 0)?;
+            self.queues[STATS_INDEX].advance_used_ring_idx();
             self.signal_used_queue()
         } else {
             error!("Failed to update balloon stats, missing descriptor.");
@@ -816,6 +799,7 @@ pub(crate) mod tests {
         // Only initialize the inflate queue to demonstrate invalid request handling.
         let infq = VirtQueue::new(GuestAddress(0), &mem, 16);
         balloon.set_queue(INFLATE_INDEX, infq.create_queue());
+        balloon.set_queue(DEFLATE_INDEX, infq.create_queue());
         balloon.activate(mem.clone()).unwrap();
 
         // Fill the second page with non-zero bytes.
@@ -874,6 +858,7 @@ pub(crate) mod tests {
         let mem = default_mem();
         let infq = VirtQueue::new(GuestAddress(0), &mem, 16);
         balloon.set_queue(INFLATE_INDEX, infq.create_queue());
+        balloon.set_queue(DEFLATE_INDEX, infq.create_queue());
         balloon.activate(mem.clone()).unwrap();
 
         // Fill the third page with non-zero bytes.
@@ -943,6 +928,7 @@ pub(crate) mod tests {
         let mut balloon = Balloon::new(0, true, 0, false).unwrap();
         let mem = default_mem();
         let defq = VirtQueue::new(GuestAddress(0), &mem, 16);
+        balloon.set_queue(INFLATE_INDEX, defq.create_queue());
         balloon.set_queue(DEFLATE_INDEX, defq.create_queue());
         balloon.activate(mem.clone()).unwrap();
 
@@ -991,6 +977,8 @@ pub(crate) mod tests {
         let mut balloon = Balloon::new(0, true, 1, false).unwrap();
         let mem = default_mem();
         let statsq = VirtQueue::new(GuestAddress(0), &mem, 16);
+        balloon.set_queue(INFLATE_INDEX, statsq.create_queue());
+        balloon.set_queue(DEFLATE_INDEX, statsq.create_queue());
         balloon.set_queue(STATS_INDEX, statsq.create_queue());
         balloon.activate(mem.clone()).unwrap();
 
@@ -1084,13 +1072,16 @@ pub(crate) mod tests {
         balloon.set_queue(DEFLATE_INDEX, defq.create_queue());
 
         balloon.activate(mem).unwrap();
-        balloon.process_virtio_queues()
+        balloon.process_virtio_queues().unwrap();
     }
 
     #[test]
     fn test_update_stats_interval() {
         let mut balloon = Balloon::new(0, true, 0, false).unwrap();
         let mem = default_mem();
+        let q = VirtQueue::new(GuestAddress(0), &mem, 16);
+        balloon.set_queue(INFLATE_INDEX, q.create_queue());
+        balloon.set_queue(DEFLATE_INDEX, q.create_queue());
         balloon.activate(mem).unwrap();
         assert_eq!(
             format!("{:?}", balloon.update_stats_polling_interval(1)),
@@ -1100,6 +1091,10 @@ pub(crate) mod tests {
 
         let mut balloon = Balloon::new(0, true, 1, false).unwrap();
         let mem = default_mem();
+        let q = VirtQueue::new(GuestAddress(0), &mem, 16);
+        balloon.set_queue(INFLATE_INDEX, q.create_queue());
+        balloon.set_queue(DEFLATE_INDEX, q.create_queue());
+        balloon.set_queue(STATS_INDEX, q.create_queue());
         balloon.activate(mem).unwrap();
         assert_eq!(
             format!("{:?}", balloon.update_stats_polling_interval(0)),

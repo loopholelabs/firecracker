@@ -18,23 +18,23 @@ from common import BKPipeline
 perf_test = {
     "virtio-block-sync": {
         "label": "💿 Virtio Sync Block Performance",
-        "tests": "integration_tests/performance/test_block_ab.py::test_block_performance -k 'not Async'",
+        "tests": "integration_tests/performance/test_block.py::test_block_performance -k 'not Async'",
         "devtool_opts": "-c 1-10 -m 0",
     },
     "virtio-block-async": {
         "label": "💿 Virtio Async Block Performance",
-        "tests": "integration_tests/performance/test_block_ab.py::test_block_performance -k Async",
+        "tests": "integration_tests/performance/test_block.py::test_block_performance -k Async",
         "devtool_opts": "-c 1-10 -m 0",
     },
     "vhost-user-block": {
         "label": "💿 vhost-user Block Performance",
-        "tests": "integration_tests/performance/test_block_ab.py::test_block_vhost_user_performance",
+        "tests": "integration_tests/performance/test_block.py::test_block_vhost_user_performance",
         "devtool_opts": "-c 1-10 -m 0",
         "ab_opts": "--noise-threshold 0.1",
     },
     "network": {
         "label": "📠 Network Latency and Throughput",
-        "tests": "integration_tests/performance/test_network_ab.py",
+        "tests": "integration_tests/performance/test_network.py",
         "devtool_opts": "-c 1-10 -m 0",
         # Triggers if delta is > 0.01ms (10µs) or default relative threshold (5%)
         # only relevant for latency test, throughput test will always be magnitudes above this anyway
@@ -42,22 +42,27 @@ perf_test = {
     },
     "snapshot-latency": {
         "label": "📸 Snapshot Latency",
-        "tests": "integration_tests/performance/test_snapshot_ab.py::test_restore_latency integration_tests/performance/test_snapshot_ab.py::test_post_restore_latency",
+        "tests": "integration_tests/performance/test_snapshot.py::test_restore_latency integration_tests/performance/test_snapshot.py::test_post_restore_latency integration_tests/performance/test_snapshot.py::test_snapshot_create_latency",
         "devtool_opts": "-c 1-12 -m 0",
     },
     "population-latency": {
         "label": "📸 Memory Population Latency",
-        "tests": "integration_tests/performance/test_snapshot_ab.py::test_population_latency",
+        "tests": "integration_tests/performance/test_snapshot.py::test_population_latency",
         "devtool_opts": "-c 1-12 -m 0",
     },
     "vsock-throughput": {
         "label": "🧦 Vsock Throughput",
-        "tests": "integration_tests/performance/test_vsock_ab.py",
+        "tests": "integration_tests/performance/test_vsock.py",
         "devtool_opts": "-c 1-10 -m 0",
     },
     "memory-overhead": {
         "label": "💾 Memory Overhead and 👢 Boottime",
         "tests": "integration_tests/performance/test_memory_overhead.py integration_tests/performance/test_boottime.py::test_boottime",
+        "devtool_opts": "-c 1-10 -m 0",
+    },
+    "jailer": {
+        "label": "⛓️ jailer",
+        "tests": "integration_tests/performance/test_jailer.py",
         "devtool_opts": "-c 1-10 -m 0",
     },
 }

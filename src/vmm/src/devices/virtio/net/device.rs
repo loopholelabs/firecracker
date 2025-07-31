@@ -31,7 +31,7 @@ use crate::devices::virtio::net::tap::Tap;
 use crate::devices::virtio::net::{
     MAX_BUFFER_SIZE, NET_QUEUE_SIZES, NetError, NetQueue, RX_INDEX, TX_INDEX, generated,
 };
-use crate::devices::virtio::queue::{DescriptorChain, Queue};
+use crate::devices::virtio::queue::{DescriptorChain, InvalidAvailIdx, Queue};
 use crate::devices::virtio::{ActivateError, TYPE_NET};
 use crate::devices::{DeviceError, report_net_event_fail};
 use crate::dumbo::pdu::arp::ETH_IPV4_FRAME_LEN;
@@ -207,7 +207,7 @@ impl RxBuffers {
     /// This will let the guest know that about all the `DescriptorChain` object that has been
     /// used to receive a frame from the TAP.
     fn finish_frame(&mut self, rx_queue: &mut Queue) {
-        rx_queue.advance_used_ring(self.used_descriptors);
+        rx_queue.advance_next_used(self.used_descriptors);
         self.used_descriptors = 0;
         self.used_bytes = 0;
     }
@@ -396,6 +396,7 @@ impl Net {
             NetQueue::Rx => &mut self.queues[RX_INDEX],
             NetQueue::Tx => &mut self.queues[TX_INDEX],
         };
+        queue.advance_used_ring_idx();
 
         if queue.prepare_kick() {
             self.irq_trigger
@@ -461,11 +462,11 @@ impl Net {
     }
 
     /// Parse available RX `DescriptorChains` from the queue
-    pub fn parse_rx_descriptors(&mut self) {
+    pub fn parse_rx_descriptors(&mut self) -> Result<(), InvalidAvailIdx> {
         // This is safe since we checked in the event handler that the device is activated.
         let mem = self.device_state.mem().unwrap();
         let queue = &mut self.queues[RX_INDEX];
-        while let Some(head) = queue.pop_or_enable_notification() {
+        while let Some(head) = queue.pop_or_enable_notification()? {
             let index = head.index;
             // SAFETY: we are only using this `DescriptorChain` here.
             if let Err(err) = unsafe { self.rx_buffer.add_buffer(mem, head) } {
@@ -491,6 +492,8 @@ impl Net {
                 self.rx_buffer.used_descriptors += 1;
             }
         }
+
+        Ok(())
     }
 
     // Tries to detour the frame to MMDS and if MMDS doesn't accept it, sends it on the host TAP.
@@ -574,7 +577,7 @@ impl Net {
         // * MAX_BUFFER_SIZE is constant and fits into u32
         #[allow(clippy::cast_possible_truncation)]
         if self.rx_buffer.capacity() < MAX_BUFFER_SIZE as u32 {
-            self.parse_rx_descriptors();
+            self.parse_rx_descriptors()?;
 
             // If after parsing the RX queue we still don't have enough capacity, stop processing RX
             // frames.
@@ -656,6 +659,9 @@ impl Net {
                     };
                     break;
                 }
+                Err(NetError::InvalidAvailIdx(err)) => {
+                    return Err(DeviceError::InvalidAvailIdx(err));
+                }
                 Err(err) => {
                     error!("Spurious error in network RX: {:?}", err);
                 }
@@ -690,7 +696,7 @@ impl Net {
         let mut used_any = false;
         let tx_queue = &mut self.queues[TX_INDEX];
 
-        while let Some(head) = tx_queue.pop_or_enable_notification() {
+        while let Some(head) = tx_queue.pop_or_enable_notification()? {
             self.metrics
                 .tx_remaining_reqs_count
                 .add(tx_queue.len().into());
@@ -701,9 +707,7 @@ impl Net {
             // are live at the same time, meaning this has exclusive ownership over the memory
             if unsafe { self.tx_buffer.load_descriptor_chain(mem, head).is_err() } {
                 self.metrics.tx_fails.inc();
-                tx_queue
-                    .add_used(head_index, 0)
-                    .map_err(DeviceError::QueueError)?;
+                tx_queue.add_used(head_index, 0)?;
                 continue;
             };
 
@@ -711,9 +715,7 @@ impl Net {
             if self.tx_buffer.len() as usize > MAX_BUFFER_SIZE {
                 error!("net: received too big frame from driver");
                 self.metrics.tx_malformed_frames.inc();
-                tx_queue
-                    .add_used(head_index, 0)
-                    .map_err(DeviceError::QueueError)?;
+                tx_queue.add_used(head_index, 0)?;
                 continue;
             }
 
@@ -741,9 +743,7 @@ impl Net {
                 process_rx_for_mmds = true;
             }
 
-            tx_queue
-                .add_used(head_index, 0)
-                .map_err(DeviceError::QueueError)?;
+            tx_queue.add_used(head_index, 0)?;
             used_any = true;
         }
 
@@ -846,7 +846,7 @@ impl Net {
             self.metrics.event_fails.inc();
             return;
         } else {
-            self.parse_rx_descriptors();
+            self.parse_rx_descriptors().unwrap();
         }
 
         if self.rx_rate_limiter.is_blocked() {
@@ -927,9 +927,15 @@ impl Net {
     }
 
     /// Process device virtio queue(s).
-    pub fn process_virtio_queues(&mut self) {
-        let _ = self.resume_rx();
-        let _ = self.process_tx();
+    pub fn process_virtio_queues(&mut self) -> Result<(), InvalidAvailIdx> {
+        if let Err(DeviceError::InvalidAvailIdx(err)) = self.resume_rx() {
+            return Err(err);
+        }
+        if let Err(DeviceError::InvalidAvailIdx(err)) = self.process_tx() {
+            return Err(err);
+        }
+
+        Ok(())
     }
 }
 
@@ -1065,6 +1071,7 @@ pub mod tests {
     impl Net {
         pub fn finish_frame(&mut self) {
             self.rx_buffer.finish_frame(&mut self.queues[RX_INDEX]);
+            self.queues[RX_INDEX].advance_used_ring_idx();
         }
     }
 

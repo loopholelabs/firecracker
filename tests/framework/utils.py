@@ -16,8 +16,8 @@ from collections import defaultdict, namedtuple
 from contextlib import contextmanager
 from typing import Dict
 
-import packaging.version
 import psutil
+import semver
 from tenacity import (
     Retrying,
     retry,
@@ -34,11 +34,15 @@ GET_CPU_LOAD = "top -bn1 -H -p {} -w512 | tail -n+8"
 
 def get_threads(pid: int) -> dict:
     """Return dict consisting of child threads."""
-    threads_map = defaultdict(list)
-    proc = psutil.Process(pid)
-    for thread in proc.threads():
-        threads_map[psutil.Process(thread.id).name()].append(thread.id)
-    return threads_map
+    try:
+        proc = psutil.Process(pid)
+
+        threads_map = defaultdict(list)
+        for thread in proc.threads():
+            threads_map[psutil.Process(thread.id).name()].append(thread.id)
+        return threads_map
+    except psutil.NoSuchProcess:
+        return {}
 
 
 def get_cpu_affinity(pid: int) -> list:
@@ -377,7 +381,7 @@ def get_firecracker_version_from_toml():
     """
     cmd = "cd ../src/firecracker && cargo pkgid | cut -d# -f2 | cut -d: -f2"
     _, stdout, _ = check_output(cmd)
-    return packaging.version.parse(stdout)
+    return semver.Version.parse(stdout)
 
 
 def get_kernel_version(level=2):
@@ -393,11 +397,16 @@ def get_kernel_version(level=2):
     return linux_version
 
 
-def generate_mmds_session_token(ssh_connection, ipv4_address, token_ttl):
+def generate_mmds_session_token(
+    ssh_connection, ipv4_address, token_ttl, imds_compat=False
+):
     """Generate session token used for MMDS V2 requests."""
     cmd = "curl -m 2 -s"
     cmd += " -X PUT"
-    cmd += ' -H  "X-metadata-token-ttl-seconds: {}"'.format(token_ttl)
+    if imds_compat:
+        cmd += ' -H "X-aws-ec2-metadata-token-ttl-seconds: {}"'.format(token_ttl)
+    else:
+        cmd += ' -H "X-metadata-token-ttl-seconds: {}"'.format(token_ttl)
     cmd += " http://{}/latest/api/token".format(ipv4_address)
     _, stdout, _ = ssh_connection.run(cmd)
     token = stdout
@@ -405,13 +414,18 @@ def generate_mmds_session_token(ssh_connection, ipv4_address, token_ttl):
     return token
 
 
-def generate_mmds_get_request(ipv4_address, token=None, app_json=True):
+def generate_mmds_get_request(
+    ipv4_address, token=None, app_json=True, imds_compat=False
+):
     """Build `GET` request to fetch metadata from MMDS."""
     cmd = "curl -m 2 -s"
 
     if token is not None:
         cmd += " -X GET"
-        cmd += ' -H  "X-metadata-token: {}"'.format(token)
+        if imds_compat:
+            cmd += ' -H "X-aws-ec2-metadata-token: {}"'.format(token)
+        else:
+            cmd += ' -H "X-metadata-token: {}"'.format(token)
 
     if app_json:
         cmd += ' -H "Accept: application/json"'
@@ -421,7 +435,9 @@ def generate_mmds_get_request(ipv4_address, token=None, app_json=True):
     return cmd
 
 
-def configure_mmds(test_microvm, iface_ids, version=None, ipv4_address=None):
+def configure_mmds(
+    test_microvm, iface_ids, version=None, ipv4_address=None, imds_compat=False
+):
     """Configure mmds service."""
     mmds_config = {"network_interfaces": iface_ids}
 
@@ -430,6 +446,9 @@ def configure_mmds(test_microvm, iface_ids, version=None, ipv4_address=None):
 
     if ipv4_address:
         mmds_config["ipv4_address"] = ipv4_address
+
+    if imds_compat is not None:
+        mmds_config["imds_compat"] = imds_compat
 
     response = test_microvm.api.mmds_config.put(**mmds_config)
     return response

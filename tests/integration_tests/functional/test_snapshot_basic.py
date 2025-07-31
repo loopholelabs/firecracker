@@ -19,7 +19,6 @@ import host_tools.cargo_build as host
 import host_tools.drive as drive_tools
 import host_tools.network as net_tools
 from framework import utils
-from framework.microvm import SnapshotType
 from framework.properties import global_props
 from framework.utils import check_filesystem, check_output
 from framework.utils_vsock import (
@@ -76,6 +75,7 @@ def test_resume(uvm_nano, microvm_factory, resume_at_restore):
         assert restored_vm.state == "Paused"
         restored_vm.resume()
     assert restored_vm.state == "Running"
+    restored_vm.ssh.check_output("true")
 
 
 def test_snapshot_current_version(uvm_nano):
@@ -111,7 +111,6 @@ def test_snapshot_current_version(uvm_nano):
 # - Rootfs: Ubuntu 18.04
 # - Microvm: 2vCPU with 512 MB RAM
 # TODO: Multiple microvm sizes must be tested in the async pipeline.
-@pytest.mark.parametrize("snapshot_type", [SnapshotType.DIFF, SnapshotType.FULL])
 @pytest.mark.parametrize("use_snapshot_editor", [False, True])
 def test_cycled_snapshot_restore(
     bin_vsock_path,
@@ -132,14 +131,13 @@ def test_cycled_snapshot_restore(
     cycles = 3
 
     logger = logging.getLogger("snapshot_sequence")
-    diff_snapshots = snapshot_type == SnapshotType.DIFF
 
     vm = microvm_factory.build(guest_kernel, rootfs)
     vm.spawn()
     vm.basic_config(
         vcpu_count=2,
         mem_size_mib=512,
-        track_dirty_pages=diff_snapshots,
+        track_dirty_pages=snapshot_type.needs_dirty_page_tracking,
     )
     vm.set_cpu_template(cpu_template_any)
     vm.add_net_iface()
@@ -391,21 +389,6 @@ def test_negative_snapshot_create(uvm_nano):
             mem_file_path="memfile", snapshot_path="statefile", snapshot_type="Full"
         )
 
-    vm.api.vm.patch(state="Paused")
-
-    # Try diff with dirty pages tracking disabled.
-    expected_msg = (
-        "Diff snapshots are not allowed on uVMs with dirty page tracking disabled"
-    )
-    with pytest.raises(RuntimeError, match=expected_msg):
-        vm.api.snapshot_create.put(
-            mem_file_path="memfile", snapshot_path="statefile", snapshot_type="Diff"
-        )
-    assert not os.path.exists("statefile")
-    assert not os.path.exists("memfile")
-
-    vm.kill()
-
 
 def test_create_large_diff_snapshot(uvm_plain):
     """
@@ -500,7 +483,6 @@ def test_snapshot_overwrite_self(guest_kernel, rootfs, microvm_factory):
     # restored, with a new snapshot of this vm, does not break the VM
 
 
-@pytest.mark.parametrize("snapshot_type", [SnapshotType.DIFF, SnapshotType.FULL])
 def test_vmgenid(guest_kernel_linux_6_1, rootfs, microvm_factory, snapshot_type):
     """
     Test VMGenID device upon snapshot resume

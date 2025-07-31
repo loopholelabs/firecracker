@@ -12,7 +12,7 @@ use std::os::raw::*;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
 use vmm_sys_util::ioctl::{ioctl_with_mut_ref, ioctl_with_ref, ioctl_with_val};
-use vmm_sys_util::{ioctl_ioc_nr, ioctl_iow_nr};
+use vmm_sys_util::ioctl_iow_nr;
 
 use crate::devices::virtio::iovec::IoVecBuffer;
 use crate::devices::virtio::net::generated;
@@ -306,7 +306,8 @@ pub mod tests {
             fragment3.as_slice(),
         ]);
 
-        tap.write_iovec(&scattered).unwrap();
+        let num_bytes = tap.write_iovec(&scattered).unwrap();
+        assert_eq!(num_bytes, scattered.len() as usize);
 
         let mut read_buf = vec![0u8; scattered.len() as usize];
         assert!(tap_traffic_simulator.pop_rx_packet(&mut read_buf));

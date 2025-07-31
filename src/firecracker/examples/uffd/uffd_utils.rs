@@ -1,8 +1,13 @@
 // Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Not everything is used by both binaries
-#![allow(dead_code)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::undocumented_unsafe_blocks,
+    // Not everything is used by both binaries
+    dead_code
+)]
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -144,13 +149,12 @@ impl UffdHandler {
         let fault_pfn = fault_page_addr / self.page_size as u64;
 
         if self.removed_pages.contains(&fault_pfn) {
-            self.zero_out(fault_page_addr);
-            return true;
-        } else {
-            for region in self.mem_regions.iter() {
-                if region.contains(fault_page_addr) {
-                    return self.populate_from_file(region, fault_page_addr, len);
-                }
+            return self.zero_out(fault_page_addr);
+        }
+
+        for region in self.mem_regions.iter() {
+            if region.contains(fault_page_addr) {
+                return self.populate_from_file(region, fault_page_addr, len);
             }
         }
 
@@ -190,14 +194,12 @@ impl UffdHandler {
         true
     }
 
-    fn zero_out(&mut self, addr: u64) {
-        let ret = unsafe {
-            self.uffd
-                .zeropage(addr as *mut _, self.page_size, true)
-                .expect("Uffd zeropage failed")
-        };
-        // Make sure the UFFD zeroed out some bytes.
-        assert!(ret > 0);
+    fn zero_out(&mut self, addr: u64) -> bool {
+        match unsafe { self.uffd.zeropage(addr as *mut _, self.page_size, true) } {
+            Ok(_) => true,
+            Err(Error::ZeropageFailed(error)) if error as i32 == libc::EAGAIN => false,
+            r => panic!("Unexpected zeropage result: {:?}", r),
+        }
     }
 }
 
@@ -293,12 +295,9 @@ impl Runtime {
             revents: 0,
         });
 
-        // We can skip polling on stream fd if
-        // the connection is closed.
-        let mut skip_stream: usize = 0;
         loop {
-            let pollfd_ptr = pollfds[skip_stream..].as_mut_ptr();
-            let pollfd_size = pollfds[skip_stream..].len() as u64;
+            let pollfd_ptr = pollfds.as_mut_ptr();
+            let pollfd_size = pollfds.len() as u64;
 
             // # Safety:
             // Pollfds vector is valid
@@ -308,7 +307,7 @@ impl Runtime {
                 panic!("Could not poll for events!")
             }
 
-            for i in skip_stream..pollfds.len() {
+            for i in 0..pollfds.len() {
                 if nready == 0 {
                     break;
                 }
@@ -327,17 +326,14 @@ impl Runtime {
                             revents: 0,
                         });
                         self.uffds.insert(handler.uffd.as_raw_fd(), handler);
-
-                        // If connection is closed, we can skip the socket from being polled.
-                        if pollfds[i].revents & (libc::POLLRDHUP | libc::POLLHUP) != 0 {
-                            skip_stream = 1;
-                        }
                     } else {
                         // Handle one of uffd page faults
                         pf_event_dispatch(self.uffds.get_mut(&pollfds[i].fd).unwrap());
                     }
                 }
             }
+            // If connection is closed, we can skip the socket from being polled.
+            pollfds.retain(|pollfd| pollfd.revents & (libc::POLLRDHUP | libc::POLLHUP) == 0);
         }
     }
 }

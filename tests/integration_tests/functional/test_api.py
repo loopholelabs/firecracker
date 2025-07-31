@@ -8,11 +8,10 @@ import os
 import platform
 import re
 import resource
-import time
 from pathlib import Path
 
-import packaging.version
 import pytest
+import semver
 
 import host_tools.drive as drive_tools
 import host_tools.network as net_tools
@@ -924,14 +923,12 @@ def test_api_version(uvm_plain):
     assert preboot_response.json() == postboot_response.json()
 
     cargo_version = get_firecracker_version_from_toml()
-    api_version = packaging.version.parse(
-        preboot_response.json()["firecracker_version"]
-    )
+    api_version = semver.Version.parse(preboot_response.json()["firecracker_version"])
 
     # Cargo version should match FC API version
     assert cargo_version == api_version
 
-    binary_version = packaging.version.parse(test_microvm.firecracker_version)
+    binary_version = semver.Version.parse(test_microvm.firecracker_version)
     assert api_version == binary_version
 
 
@@ -1020,11 +1017,8 @@ def test_api_balloon(uvm_nano):
         )
 
     # Start the microvm.
+    test_microvm.add_net_iface()
     test_microvm.start()
-
-    # Give the balloon driver time to initialize.
-    # 500 ms is the maximum acceptable boot time.
-    time.sleep(0.5)
 
     # But updating should be OK.
     test_microvm.api.balloon.patch(amount_mib=4)
@@ -1145,11 +1139,12 @@ def test_get_full_config_after_restoring_snapshot(microvm_factory, uvm_nano):
         "boot_args": None,
     }
 
-    # no ipv4 specified during PUT /mmds/config so we expect the default
+    # no ipv4_address or imds_compat specified during PUT /mmds/config so we expect the default
     expected_cfg["mmds-config"] = {
         "version": "V1",
         "ipv4_address": "169.254.169.254",
         "network_interfaces": [net_iface.dev_name],
+        "imds_compat": False,
     }
 
     # We should expect a null entropy device
@@ -1241,6 +1236,7 @@ def test_get_full_config(uvm_plain):
         "version": "V2",
         "ipv4_address": "169.254.169.250",
         "network_interfaces": ["1"],
+        "imds_compat": True,
     }
     response = test_microvm.api.mmds_config.put(**mmds_config)
 
@@ -1250,6 +1246,7 @@ def test_get_full_config(uvm_plain):
         "version": "V2",
         "ipv4_address": "169.254.169.250",
         "network_interfaces": ["1"],
+        "imds_compat": True,
     }
 
     # We should expect a null entropy device
